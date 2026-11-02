@@ -9,13 +9,14 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import WebSocket, { WebSocketServer } from 'ws';
 import { z } from 'zod';
-import { EXTENSION_ID } from '../extension/id.js';
+import { EXTENSION_ID, STORE_ID } from '../extension/id.js';
 import { fingerprint } from '../extension/build.js';
 import { checkMailbox, findVerification, lookupProvider } from './mail.js';
 
 const VERSION = '0.1.0';
 const PORT = Number(process.env.LATCH_PORT || 47801);
-const EXTENSION_ORIGIN = `chrome-extension://${EXTENSION_ID}`;
+// The unpacked copy and the Chrome Web Store copy have different IDs.
+const EXTENSION_ORIGINS = new Set([EXTENSION_ID, STORE_ID].filter(Boolean).map(id => `chrome-extension://${id}`));
 const log = msg => process.stderr.write(`latch: ${msg}\n`);
 
 const UNAVAILABLE = {
@@ -82,7 +83,7 @@ function listen() {
       host: '127.0.0.1',
       port: PORT,
       maxPayload: 1 << 20,
-      verifyClient: ({ origin, req }) => origin === EXTENSION_ORIGIN || (!origin && req.url === '/peer'),
+      verifyClient: ({ origin, req }) => EXTENSION_ORIGINS.has(origin) || (!origin && req.url === '/peer'),
     });
     server.once('listening', () => resolve(server));
     server.once('error', reject);
@@ -146,7 +147,7 @@ async function onPeerMessage(ws, data) {
     ws.clientName = String(msg.client || '').slice(0, 60);
     send(extension, { type: 'hello', version: VERSION, clients: clients() });
   } else if (msg.type === 'call') {
-    const result = await callExtension(msg.tool, msg.args, Math.min(Number(msg.timeoutMs) || 60000, 90000));
+    const result = await callExtension(msg.tool, msg.args, Math.min(Number(msg.timeoutMs) || 60000, 90000), ws.clientName);
     send(ws, { type: 'result', id: msg.id, result });
   }
 }
@@ -160,7 +161,7 @@ function waitForExtension(ms) {
   });
 }
 
-async function callExtension(tool, args, timeoutMs) {
+async function callExtension(tool, args, timeoutMs, client = clientName) {
   await waitForExtension(30000);
   if (!extension) return UNAVAILABLE;
   if (!extensionReady || extensionReadyBuild !== await extensionBuild()) return RELOAD_REQUIRED;
@@ -168,7 +169,7 @@ async function callExtension(tool, args, timeoutMs) {
   return new Promise(resolve => {
     const timer = setTimeout(() => { pending.delete(id); resolve(TIMED_OUT); }, timeoutMs);
     pending.set(id, result => { clearTimeout(timer); pending.delete(id); resolve(result); });
-    send(extension, { type: 'call', id, tool, args });
+    send(extension, { type: 'call', id, tool, args, client });
   });
 }
 

@@ -47,7 +47,9 @@ npm run setup
 
 1. Load `extension/` with "Load unpacked" on `chrome://extensions` (Developer mode on).
 2. Click the Latch icon and enter your email, password and an app password for your inbox.
-3. Add the MCP server to your AI. Run `npm run setup -- --claude-code`, `--claude-desktop` or `--codex`.
+3. Connect your AI. The last setup screen in the popup shows the exact command for Claude Code, Codex and Claude Desktop, and turns green once one connects. From a terminal you can also run `npm run setup -- --claude-code`, `--claude-desktop` or `--codex`.
+
+After setup, nothing asks for approval. The popup's home screen shows what the page in front of you offers (a sign-in page, a sign-up page, a code prompt) with one button to run Latch on it, followed by recent activity and the accounts Latch knows.
 
 The inbox step is optional. Gmail app passwords need 2-Step Verification, many school and work Google accounts block them, and Outlook.com no longer accepts them for mail. Without an inbox connection, when a site emails a code or confirmation link, Latch returns `check_inbox` with your webmail address (for example `https://mail.google.com`). The AI uses its connected mail tools when available, otherwise webmail, to read only the newest matching verification message and finish the step itself. The user does not need to retrieve the email. In that case the AI sees that email; your password still stays private.
 
@@ -55,7 +57,7 @@ The inbox step is optional. Gmail app passwords need 2-Step Verification, many s
 
 - Tool results never include the email, passwords, codes or links. The one exception is the `check_inbox` fallback above, where the AI reads the code from your webmail itself. Every result goes through a fixed schema and a redaction pass before it leaves the extension or the server.
 - While Latch fills a form, the AI is blocked waiting on the tool call. On normal forms the password goes in and the form is submitted in one script task, and the fields are emptied as soon as the browser has captured them. On single-page forms the password stays in the field until the site answers (about 0.4 s in the test), and Latch empties the fields before it returns.
-- Passwords Latch generates only go to the site they were made for. Your main password is used on any site the AI signs in to, with no prompts, so a page that tricks your AI into a fake login would receive it. Letting Latch generate passwords for new accounts keeps that exposure to the sites where you reuse your main password.
+- Passwords Latch generates only go to the site they were made for. Your main password is used without prompts, but Latch first checks the page itself and refuses, with `blocked` / `suspicious_site`, when the address imitates a site you have an account on, your email's domain or a commonly impersonated brand (near-miss spellings, swapped characters like `paypa1`, the real name buried in someone else's domain); when the page is on a bare IP address or uses look-alike international characters; or when the form would send the password to a different site. `test/real-sites.mjs` checks that real application sites are not refused.
 - Latch fills credentials only on https pages, and on http when the page is local.
 
 Latch can't hide what a site shows you after you sign in, like a profile menu with your email in it. `fill_email` also leaves the address in the field, where the AI could read it back. Anything running as you on this computer can read Chrome's extension storage. That includes an AI with a shell or full desktop control. Latch keeps your details from an AI whose only reach is the browser.
@@ -63,6 +65,10 @@ Latch can't hide what a site shows you after you sign in, like a profile menu wi
 ## What it hands back to you
 
 CAPTCHAs, codes sent to your phone, authenticator apps, passkeys, push approvals and locked accounts come back as `needs_user`, with a reason. Latch stops before filling anything it can't finish. It doesn't use "Continue with Google"-style buttons. It fills the site's own form.
+
+## Publish
+
+`npm run package` builds `dist/latch-<version>.zip` for the Chrome Web Store, without the development key. `docs/STORE.md` has the listing text, permission justifications and data disclosures. `docs/PRIVACY.md` is the privacy policy to host and link. After the first upload, put the store's extension ID in `STORE_ID` in `extension/id.js`.
 
 ## Test
 

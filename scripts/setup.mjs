@@ -14,6 +14,9 @@ const server = join(root, 'server', 'index.js');
 const extension = join(root, 'extension');
 const args = new Set(process.argv.slice(2));
 
+// Tells the popup where this copy lives, so its "Connect your AI" commands work as pasted.
+writeFileSync(join(extension, 'install.json'), JSON.stringify({ server, setup: fileURLToPath(import.meta.url) }, null, 2));
+
 function claudeCode() {
   execSync(`claude mcp add --scope user latch -- node "${server}"`, { stdio: 'inherit' });
 }

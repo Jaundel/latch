@@ -8,6 +8,7 @@
 import { chromium } from 'playwright';
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { mainPasswordRisk } from '../extension/guard.js';
 
 const source = readFileSync(fileURLToPath(new URL('../extension/page.js', import.meta.url)), 'utf8')
   .replace('globalThis.__latch = {', 'globalThis.__latch = { findSubmit, byRef,');
@@ -55,6 +56,8 @@ async function dryRunFrame(frame) {
         && !['password', 'email'].includes(el.type) && !/e-?mail|password/i.test(el.getAttribute('autocomplete') || '');
     }).map(el => ([...(el.labels || [])].map(l => l.innerText).join(' ') || el.getAttribute('aria-label') || el.name || el.id || el.type).trim().replace(/\s+/g, ' ').slice(0, 40));
     return {
+      host: location.hostname,
+      formAction: Object.values(snap.actions || {})[0] || '',
       url: location.hostname + location.pathname,
       state, kinds, digits: snap.digits.length, captcha: snap.captcha, auth: snap.auth,
       flags: Object.entries(snap.flags).filter(([, v]) => v).map(([k]) => k),
@@ -116,6 +119,7 @@ for (const t of TARGETS.filter(t => t.name.includes(filter))) {
     }
     const r = await dryRun(page);
     const acts = [r.auth?.login && 'login', r.auth?.signup && 'signup'].filter(Boolean).join('+') || 'none';
+    r.guard = mainPasswordRisk({ host: r.host, formActionHost: r.formAction, email: 'someone@torontomu.ca' }) || 'allowed';
     results.push({ name: t.name, expect: t.expect, latchWouldAct: acts, ok: acts === t.expect || (t.expect === 'login' && acts === 'login+signup' && r.state === 'identifier'), ...r });
     if (acts !== t.expect) await page.screenshot({ path: fileURLToPath(new URL(`./output/real-${t.name}.png`, import.meta.url)) }).catch(() => {});
   } catch (err) {
@@ -130,6 +134,7 @@ writeFileSync(fileURLToPath(new URL('./output/real-sites.json', import.meta.url)
 for (const r of results) {
   if (r.error) { console.log(`ERROR ${r.name}: ${r.error}`); continue; }
   console.log(`${r.ok ? 'OK   ' : 'MISS '} ${r.name}  expect=${r.expect} latch=${r.latchWouldAct} state=${r.state} fields=[${r.kinds.join(', ')}]${r.digits ? ` digits=${r.digits}` : ''}`);
+  console.log(`      main password: ${r.guard}${r.formAction ? ` (form posts to ${r.formAction})` : ''}`);
   console.log(`      login→ ${JSON.stringify(r.login)}  signup→ ${JSON.stringify(r.signup)}  captcha=${r.captcha} flags=${r.flags.join(',')}`);
   if (r.otherRequired.length) console.log(`      AI must fill: ${r.otherRequired.join(' | ')}`);
 }

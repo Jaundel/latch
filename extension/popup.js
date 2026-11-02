@@ -4,8 +4,12 @@ const conn = document.getElementById('conn');
 const call = (type, data = {}) => chrome.runtime.sendMessage({ type, ...data });
 
 let state = null;
-let screen = null;   // 'identity' | 'inbox' | 'home' | 'settings'
-let revealed = {};   // host -> password, popup memory only
+let screen = null;     // 'identity' | 'inbox' | 'connect' | 'home' | 'activity' | 'settings'
+let onboarding = false;
+let revealed = {};     // host -> password, popup memory only
+let page = null;       // what the active tab offers: { kind, host, saved }
+let tabRun = null;     // { busy } or the result of running Latch on the active tab
+let allSites = false;
 
 function h(tag, attrs = {}, ...children) {
   const el = document.createElement(tag);
@@ -20,10 +24,15 @@ function h(tag, attrs = {}, ...children) {
   return el;
 }
 
-const CLIENT_NAMES = { 'claude-code': 'Claude Code', 'claude-ai': 'Claude', 'codex-mcp-client': 'Codex', 'codex': 'Codex' };
+const CLIENT_NAMES = { 'claude-code': 'Claude Code', 'claude-ai': 'Claude', 'codex-mcp-client': 'Codex', codex: 'Codex', you: 'You' };
+const clientName = c => CLIENT_NAMES[c] || c || 'Your AI';
+
+function connectedClients() {
+  return [...new Set((state?.clients || []).map(clientName))];
+}
 
 function renderConnection() {
-  const clients = [...new Set((state?.clients || []).map(c => CLIENT_NAMES[c] || c))];
+  const clients = connectedClients();
   const on = state?.connected;
   conn.classList.toggle('on', !!on);
   conn.querySelector('.conn-text').textContent = on
@@ -55,7 +64,48 @@ function passwordInput(id, attrs) {
   return h('div', { class: 'input' }, input, peek);
 }
 
-// ---------- setup: identity
+function favicon(host) {
+  const letter = (host || '?').replace(/^www\./, '')[0] || '?';
+  const box = h('span', { class: 'fav', 'aria-hidden': 'true' }, letter);
+  if (host && !/\.(test|localhost)$|^localhost$|^[\d.]+$/.test(host)) {
+    const img = h('img', { alt: '', src: chrome.runtime.getURL(`/_favicon/?pageUrl=${encodeURIComponent('https://' + host)}&size=32`) });
+    img.onload = () => box.replaceChildren(img);
+  }
+  return box;
+}
+
+function backButton(to) {
+  return h('button', { class: 'back', type: 'button', onclick: () => show(to) }, '← Back');
+}
+
+const steps = n => h('p', { class: 'step' }, `Step ${n} of 3`);
+
+// ---------- what a result means, in a few words
+
+const NEEDS = {
+  captcha: 'Needs you: CAPTCHA', phone_code: 'Needs you: phone code', authenticator_code: 'Needs you: authenticator code',
+  passkey: 'Needs you: passkey', push_approval: 'Needs you: approve on your phone', locked: 'Account locked', mailbox: 'Needs your inbox',
+};
+
+function outcome(a) {
+  const good = { signed_in: 'Signed in', account_created: 'Created an account', verified: 'Verified email', filled: 'Filled in your email' };
+  if (good[a.status]) return { text: good[a.status], tone: 'good' };
+  const waiting = {
+    check_inbox: 'Code emailed; your AI is fetching it', verification_pending: 'Waiting for the email', needs_user: NEEDS[a.reason] || 'Needs you',
+    unconfirmed: 'Sign-in not confirmed', retry_blocked: 'Holding off before retrying', reload_required: 'Update ready: reload Latch',
+  };
+  if (waiting[a.status]) return { text: waiting[a.status], tone: 'wait' };
+  const neutral = { no_form: 'No sign-in form on the page', account_exists: 'Account already existed', no_account: 'No account there yet', paused: 'Skipped while paused', not_set_up: 'Not set up' };
+  if (neutral[a.status]) return { text: neutral[a.status], tone: 'muted' };
+  const bad = {
+    blocked: a.reason === 'suspicious_site' ? 'Refused a suspicious page' : 'Refused an insecure page',
+    wrong_password: 'Password rejected', credentials_or_account_problem: 'Sign-in rejected', sign_in_failed: 'Sign-in failed',
+    sign_up_failed: 'Sign-up failed', verification_failed: 'Code not accepted', unavailable: 'Chrome not reachable', error: 'Something went wrong',
+  };
+  return { text: bad[a.status] || String(a.status || '').replace(/_/g, ' '), tone: 'bad' };
+}
+
+// ---------- setup 1: email and password
 
 function identityScreen() {
   const editing = state.setup;
@@ -72,11 +122,12 @@ function identityScreen() {
       go.disabled = true;
       await call('saveIdentity', { email: email.value.trim(), password: pw.querySelector('input').value });
       await refresh();
-      show(editing ? 'home' : 'inbox');
+      if (editing) show('home');
+      else { onboarding = true; show('inbox'); }
     },
     oninput: update,
   },
-    editing ? backButton('home') : h('p', { class: 'step' }, 'Step 1 of 2'),
+    editing ? backButton('home') : steps(1),
     h('h1', {}, editing ? 'Your sign-in details' : 'Set up Latch'),
     h('p', { class: 'lede' }, 'Your AI uses these to sign in and create accounts for you. They stay on this computer, and the AI never sees them.'),
     h('label', { class: 'field' }, h('span', {}, 'Email'), email),
@@ -88,7 +139,7 @@ function identityScreen() {
   (state.email ? pw.querySelector('input') : email).focus();
 }
 
-// ---------- setup: inbox
+// ---------- setup 2: inbox (optional)
 
 async function inboxScreen() {
   const editing = !!state.mailbox;
@@ -98,9 +149,10 @@ async function inboxScreen() {
   const port = h('input', { type: 'number', value: state.mailbox?.port || provider.port || 993 });
   const username = h('input', { type: 'text', value: user, spellcheck: 'false' });
   const tls = h('input', { type: 'checkbox', checked: state.mailbox ? state.mailbox.secure : true });
-  const pass = passwordInput('app-password', { placeholder: provider.name === 'Gmail' || provider.host === 'imap.gmail.com' ? 'xxxx xxxx xxxx xxxx' : 'App password' });
+  const pass = passwordInput('app-password', { placeholder: provider.host === 'imap.gmail.com' ? 'xxxx xxxx xxxx xxxx' : 'App password' });
   const notice = h('p', { class: 'notice', role: 'status' });
   const go = h('button', { class: 'btn primary', type: 'submit' }, editing ? 'Save' : 'Connect inbox');
+  const next = () => show(onboarding ? 'connect' : 'settings');
 
   const card = h('div', { class: 'provider' },
     h('div', { class: 'row' }, h('strong', {}, provider.name || 'Your mail'), h('span', { class: 'muted' }, provider.host || '')),
@@ -129,12 +181,12 @@ async function inboxScreen() {
         return;
       }
       await refresh();
-      show('home');
+      next();
     },
   },
-    editing ? backButton('settings') : h('p', { class: 'step' }, 'Step 2 of 2'),
+    onboarding ? steps(2) : backButton('settings'),
     h('h1', {}, 'Connect your inbox'),
-    h('p', { class: 'lede' }, 'Optional. With it, Latch enters emailed verification codes for you, opening only recent messages from the site being signed in to. Without it, your AI reads the code from your inbox in another tab.'),
+    h('p', { class: 'lede' }, 'Optional. With it, Latch enters emailed codes itself. Without it, your AI reads them from your webmail in another tab.'),
     card,
     h('label', { class: 'field' }, h('span', {}, 'App password'), pass),
     h('details', { class: 'adv' }, h('summary', {}, 'Server settings'),
@@ -144,36 +196,110 @@ async function inboxScreen() {
         h('label', { class: 'field full' }, h('span', {}, 'Username'), username),
         h('label', { class: 'check full' }, tls, h('span', {}, h('b', {}, 'Use TLS'))))),
     notice,
-    h('div', { class: 'actions' }, go, editing ? null : h('button', { class: 'link', type: 'button', onclick: () => show('home') }, 'Skip for now')),
+    h('div', { class: 'actions' }, go, onboarding ? h('button', { class: 'link', type: 'button', onclick: next }, 'Skip') : null),
   );
   view.replaceChildren(form);
   pass.querySelector('input').focus();
-  if (!state.connected) {
-    notice.textContent = 'Your AI isn’t connected, so Latch will check this the first time it’s needed.';
-  }
+  if (!state.connected) notice.textContent = 'Latch will check this the first time your AI needs it.';
+}
+
+// ---------- setup 3: connect the AI
+
+async function installInfo() {
+  try { return await (await fetch(chrome.runtime.getURL('install.json'))).json(); } catch { return null; }
+}
+
+async function connectScreen() {
+  const install = await installInfo();
+  const q = s => `"${s}"`;
+  const commands = install ? [
+    ['Claude Code', `claude mcp add --scope user latch -- node ${q(install.server)}`],
+    ['Codex', `node ${q(install.setup)} --codex`],
+    ['Claude Desktop', `node ${q(install.setup)} --claude-desktop`],
+  ] : [];
+  const status = h('div', { class: 'live', role: 'status' });
+  const paint = () => {
+    const on = state.connected;
+    status.className = `live${on ? ' on' : ''}`;
+    status.replaceChildren(h('span', { class: 'dot' }), on ? `Connected to ${connectedClients().join(', ') || 'your AI'}` : 'Waiting for your AI…');
+  };
+  paint();
+  connectScreen.paint = paint;
+
+  view.replaceChildren(
+    onboarding ? steps(3) : backButton('settings'),
+    h('h1', {}, 'Connect your AI'),
+    h('p', { class: 'lede' }, 'Run one of these in a terminal, then restart that AI. It can then call Latch whenever a page asks it to sign in.'),
+    status,
+    commands.length
+      ? h('ul', { class: 'cmds' }, commands.map(([name, cmd]) => {
+        const copy = h('button', {
+          class: 'row-action', type: 'button',
+          onclick: async () => { await navigator.clipboard.writeText(cmd); copy.textContent = 'Copied'; setTimeout(() => { copy.textContent = 'Copy'; }, 1500); },
+        }, 'Copy');
+        return h('li', {}, h('div', { class: 'cmd-head' }, h('b', {}, name), copy), h('code', {}, cmd));
+      }))
+      : h('p', { class: 'notice' }, 'Run npm run setup in the Latch folder first; this screen then shows the exact commands.'),
+    h('button', { class: 'btn primary block', type: 'button', onclick: () => { onboarding = false; show('home'); } }, state.connected ? 'Done' : 'Finish later'),
+  );
 }
 
 // ---------- home
 
-function favicon(host) {
-  const letter = host.replace(/^www\./, '')[0] || '?';
-  const box = h('span', { class: 'fav' }, letter);
-  if (!/\.(test|localhost)$|^localhost$|^[\d.]+$/.test(host)) {
-    const img = h('img', { alt: '', src: chrome.runtime.getURL(`/_favicon/?pageUrl=${encodeURIComponent('https://' + host)}&size=32`) });
-    img.onload = () => box.replaceChildren(img);
-  }
-  return box;
+const PAGE = {
+  sign_in: { title: 'Sign-in page', sub: p => (p.saved ? 'Latch has a saved account for this site.' : 'Latch will use your email and password.'), tool: 'sign_in', action: 'Sign in' },
+  sign_up: { title: 'Sign-up page', sub: () => 'Latch will create the account with a new strong password.', tool: 'create_account', action: 'Create account' },
+  code: { title: 'Asking for a code', sub: () => (state.mailbox ? 'Latch can read it from your inbox.' : 'Connect your inbox and Latch can enter it.'), tool: 'verify_email', action: 'Enter code' },
+  check_email: { title: 'Waiting on an email link', sub: () => (state.mailbox ? 'Latch can open it from your inbox.' : 'Your AI can open it from your webmail.'), tool: 'verify_email', action: 'Verify email' },
+  captcha: { title: 'CAPTCHA on this page', sub: () => 'Solve it in the page, then let your AI carry on.' },
+  signed_in: { title: 'Signed in', sub: () => 'Nothing for Latch to do here.' },
+  none: { title: 'Nothing to sign in to', sub: () => 'Latch steps in when a page asks for an account.' },
+  blank: { title: 'Open a website', sub: () => 'Latch works on the page in front of you.' },
+};
+
+function pageCard() {
+  if (!page) return h('section', { class: 'page loading', 'aria-busy': 'true' }, h('div', { class: 'page-title' }, 'Reading this page…'));
+  const info = PAGE[page.kind] || PAGE.none;
+  const result = tabRun && !tabRun.busy ? outcome(tabRun) : null;
+  return h('section', { class: 'page', 'aria-label': 'This page' },
+    h('div', { class: 'page-head' },
+      page.host ? favicon(page.host) : null,
+      h('div', { style: 'min-width:0' },
+        page.host ? h('div', { class: 'page-host', title: page.host }, page.host) : null,
+        h('div', { class: 'page-title' }, info.title))),
+    h('p', { class: 'page-sub' }, info.sub(page)),
+    info.tool ? h('button', {
+      class: 'btn primary block', type: 'button', disabled: !!tabRun?.busy || state.settings.paused,
+      onclick: async () => {
+        tabRun = { busy: true };
+        render();
+        tabRun = await call('runHere', { tool: info.tool });
+        page = await call('pageState');
+        await refresh();
+        render();
+      },
+    }, tabRun?.busy ? 'Working…' : info.action) : null,
+    result ? h('p', { class: `notice ${result.tone === 'good' ? 'good' : result.tone === 'bad' ? 'bad' : ''}`, role: 'status' },
+      tabRun.message || result.text) : null);
+}
+
+function activityRow(a) {
+  const o = outcome(a);
+  return h('li', { class: 'row act' },
+    h('span', { class: `tone ${o.tone}`, 'aria-hidden': 'true' }),
+    h('div', { style: 'min-width:0' },
+      h('div', { class: 'name' }, o.text),
+      h('div', { class: 'sub' }, [a.site, clientName(a.client), ago(a.at)].filter(Boolean).join(' · '))));
 }
 
 function siteRow(site) {
   const status = site.status === 'pending' ? 'Sign-up in progress' : site.source === 'latch' ? 'Created by Latch' : 'Signed in';
-  const when = ago(site.lastUsed || site.createdAt);
   const row = h('li', { class: 'row' },
     favicon(site.host),
-    h('div', {}, h('div', { class: 'name' }, site.host), h('div', { class: 'sub' }, [status, when].filter(Boolean).join(' · '))),
+    h('div', { style: 'min-width:0' }, h('div', { class: 'name' }, site.host), h('div', { class: 'sub' }, [status, ago(site.lastUsed || site.createdAt)].filter(Boolean).join(' · '))),
     site.hasPassword
       ? h('button', {
-        class: 'row-action', type: 'button',
+        class: 'row-action', type: 'button', 'aria-label': `${revealed[site.host] ? 'Hide' : 'Show'} password for ${site.host}`,
         onclick: async () => {
           if (revealed[site.host]) delete revealed[site.host];
           else revealed[site.host] = (await call('reveal', { host: site.host })).password;
@@ -192,73 +318,80 @@ function siteRow(site) {
   return row;
 }
 
-// Run Latch on the page in front of the user, the same way the AI's tools do.
-// The outcome lives in `tabRun` so the periodic redraw keeps it on screen.
-let tabRun = null;   // { busy } or { status, message }
-
-function thisTab() {
-  const run = (tool, label) => h('button', {
-    class: 'btn small', type: 'button', disabled: !!tabRun?.busy,
-    onclick: async () => {
-      tabRun = { busy: true };
-      render();
-      tabRun = await call('runHere', { tool });
-      await refresh();
-      render();
-    },
-  }, label);
-  const good = tabRun && /^(signed_in|account_created|verified|filled)$/.test(tabRun.status);
-  return h('div', {},
-    h('div', { class: 'section-head' }, h('h2', {}, 'This tab')),
-    h('div', { class: 'actions', style: 'margin:0 0 6px' }, run('sign_in', 'Sign in here'), run('create_account', 'Create account here'), run('verify_email', 'Verify email')),
-    h('p', { class: `notice${tabRun?.busy ? '' : good ? ' good' : tabRun ? ' bad' : ''}`, role: 'status' },
-      tabRun?.busy ? 'Working on this tab…' : tabRun ? tabRun.message || tabRun.status : ''));
-}
-
 function homeScreen() {
   const s = state;
-  const inbox = s.mailbox ? 'Inbox connected' : h('span', { class: 'warn' }, 'Inbox not connected');
-  const parts = [
-    h('div', { class: 'identity' },
-      h('div', { class: 'avatar' }, s.email[0] || '?'),
-      h('div', { style: 'min-width:0' },
-        h('div', { class: 'email', title: s.email }, s.email),
-        h('div', { class: 'meta' }, 'Password saved · ', inbox)),
-      h('button', { class: 'link', type: 'button', onclick: () => show('identity') }, 'Edit')),
-  ];
-
-  if (!s.mailbox) {
-    parts.push(h('div', { class: 'banner' },
-      'Optional: connect your inbox and Latch will enter emailed codes for you. ',
-      h('button', { class: 'link', type: 'button', onclick: () => show('inbox') }, 'Connect')));
+  if (!page && !homeScreen.reading) {
+    homeScreen.reading = true;
+    call('pageState').catch(() => ({ kind: 'none', host: '' })).then(p => {
+      page = p;
+      homeScreen.reading = false;
+      if (screen === 'home') render();
+    });
   }
+  const parts = [pageCard()];
+
+  parts.push(h('div', { class: 'identity' },
+    h('div', { class: 'avatar', 'aria-hidden': 'true' }, s.email[0] || '?'),
+    h('div', { style: 'min-width:0' },
+      h('div', { class: 'email', title: s.email }, s.email),
+      h('div', { class: 'meta' }, 'Password saved · ', s.mailbox
+        ? 'Inbox connected'
+        : h('button', { class: 'link inline', type: 'button', onclick: () => { onboarding = false; show('inbox'); } }, 'Connect inbox'))),
+    h('button', { class: 'link', type: 'button', onclick: () => show('identity') }, 'Edit')));
+
   if (!s.connected) {
-    parts.push(h('div', { class: 'banner' }, 'Waiting for your AI. Latch connects when Claude or Codex starts with the Latch tool added.'));
+    parts.push(h('div', { class: 'banner' }, 'No AI is connected. ',
+      h('button', { class: 'link inline', type: 'button', onclick: () => { onboarding = false; show('connect'); } }, 'Connect one')));
   }
 
-  parts.push(thisTab());
+  if (s.activity.length) {
+    parts.push(h('div', { class: 'section-head' }, h('h2', {}, 'Recent'),
+      h('button', { class: 'link small', type: 'button', onclick: () => show('activity') }, 'All activity')));
+    parts.push(h('ul', { class: 'list' }, s.activity.slice(0, 3).map(activityRow)));
+  }
 
-  parts.push(h('div', { class: 'section-head' }, h('h2', {}, 'Sites'), s.sites.length ? h('span', {}, String(s.sites.length)) : null));
-  parts.push(s.sites.length
-    ? h('ul', { class: 'list' }, s.sites.map(siteRow))
-    : h('p', { class: 'empty' }, 'Sites show up here after your AI signs in or creates an account.'));
+  parts.push(h('div', { class: 'section-head' }, h('h2', {}, 'Accounts'), s.sites.length ? h('span', {}, String(s.sites.length)) : null));
+  if (s.sites.length) {
+    const shown = allSites ? s.sites : s.sites.slice(0, 4);
+    parts.push(h('ul', { class: 'list' }, shown.map(siteRow)));
+    if (s.sites.length > 4) {
+      parts.push(h('button', { class: 'link small more', type: 'button', onclick: () => { allSites = !allSites; render(); } },
+        allSites ? 'Show fewer' : `Show all ${s.sites.length}`));
+    }
+  } else {
+    parts.push(h('p', { class: 'empty' }, 'Accounts show up here after your AI signs in or creates one.'));
+  }
 
   const toggle = h('input', {
     type: 'checkbox', checked: !s.settings.paused,
     onchange: async e => { await call('settings', { patch: { paused: !e.target.checked } }); await refreshAndRender(); },
   });
   parts.push(h('div', { class: 'foot' },
-    h('label', { class: 'switch' }, toggle, h('span', { class: 'track' }), s.settings.paused ? 'AI sign-in paused' : 'AI sign-in on'),
+    h('label', { class: 'switch' }, toggle, h('span', { class: 'track' }), s.settings.paused ? 'Paused' : 'On'),
     h('button', { class: 'link', type: 'button', onclick: () => show('settings') }, 'Settings')));
 
   view.replaceChildren(...parts);
 }
 
-// ---------- settings
+// ---------- activity
 
-function backButton(to) {
-  return h('button', { class: 'back', type: 'button', onclick: () => show(to) }, '← Back');
+function activityScreen() {
+  const days = new Map();
+  for (const a of state.activity) {
+    const day = new Date(a.at).toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' });
+    if (!days.has(day)) days.set(day, []);
+    days.get(day).push(a);
+  }
+  view.replaceChildren(
+    backButton('home'),
+    h('h1', {}, 'Activity'),
+    state.activity.length
+      ? [...days].map(([day, items]) => h('div', {}, h('div', { class: 'section-head' }, h('h2', {}, day)), h('ul', { class: 'list' }, items.map(activityRow))))
+      : h('p', { class: 'empty' }, 'Nothing yet. Every sign-in and sign-up your AI runs through Latch is listed here.'),
+  );
 }
+
+// ---------- settings
 
 function settingsScreen() {
   const s = state;
@@ -271,26 +404,31 @@ function settingsScreen() {
   erase.append(h('button', {
     class: 'link danger', type: 'button',
     onclick: () => erase.replaceChildren(h('div', { class: 'confirm' },
-      h('p', {}, 'This removes your email, password, inbox connection and every saved site password from Latch.'),
+      h('p', {}, 'This removes your email, password, inbox connection and every saved account password from Latch.'),
       h('div', { class: 'actions' },
         h('button', { class: 'btn small', type: 'button', onclick: () => render() }, 'Cancel'),
         h('button', { class: 'btn primary small', type: 'button', onclick: async () => { await call('erase'); revealed = {}; await refresh(); show('identity'); } }, 'Erase everything')))),
   }, 'Erase everything'));
 
+  const clients = connectedClients();
   view.replaceChildren(
     backButton('home'),
     h('h1', {}, 'Settings'),
     h('div', { class: 'block-setting' },
       h('b', {}, 'New account passwords'),
-      h('div', { class: 'segmented', role: 'group' }, mode('unique'), mode('mine')),
+      h('div', { class: 'segmented', role: 'group', 'aria-label': 'New account passwords' }, mode('unique'), mode('mine')),
       h('small', {}, s.settings.newPasswords === 'unique'
-        ? 'Each new account gets its own strong password. You can view them on the main screen.'
+        ? 'Each new account gets its own strong password. You can view them under Accounts.'
         : 'New accounts use the password you saved in Latch.')),
+    h('div', { class: 'setting' },
+      h('div', { style: 'min-width:0' }, h('b', {}, 'AI connections'),
+        h('small', {}, s.connected ? clients.join(', ') || 'Connected' : 'None connected')),
+      h('button', { class: 'link', type: 'button', onclick: () => { onboarding = false; show('connect'); } }, 'Connect')),
     h('div', { class: 'setting' },
       h('div', { style: 'min-width:0' }, h('b', {}, 'Inbox'),
         h('small', {}, s.mailbox ? `${s.mailbox.user} · ${s.mailbox.host}` : 'Not connected')),
       h('div', { class: 'actions', style: 'margin:0' },
-        h('button', { class: 'link', type: 'button', onclick: () => show('inbox') }, s.mailbox ? 'Change' : 'Connect'),
+        h('button', { class: 'link', type: 'button', onclick: () => { onboarding = false; show('inbox'); } }, s.mailbox ? 'Change' : 'Connect'),
         s.mailbox ? h('button', { class: 'link', type: 'button', onclick: () => call('removeMailbox').then(refreshAndRender) }, 'Disconnect') : null)),
     h('div', { class: 'setting' }, erase),
   );
@@ -306,6 +444,8 @@ async function refresh() {
 function render() {
   if (screen === 'identity') return identityScreen();
   if (screen === 'inbox') return inboxScreen();
+  if (screen === 'connect') return connectScreen();
+  if (screen === 'activity') return activityScreen();
   if (screen === 'settings') return settingsScreen();
   return homeScreen();
 }
@@ -313,7 +453,9 @@ function render() {
 async function refreshAndRender() {
   const before = JSON.stringify(state);
   await refresh();
-  if ((screen === 'home' || screen === 'settings') && JSON.stringify(state) !== before) render();
+  if (JSON.stringify(state) === before) return;
+  if (screen === 'connect') connectScreen.paint?.();
+  else if (['home', 'activity', 'settings'].includes(screen)) render();
 }
 
 function show(next) {

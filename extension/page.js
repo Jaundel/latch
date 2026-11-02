@@ -135,6 +135,13 @@
     const choices = [...document.querySelectorAll('a, button, [role=button], input[type=submit], input[type=button]')]
       .filter(visible).map(el => el.tagName === 'INPUT' ? el.value : textOf(el));
     const offers = pattern => choices.some(label => pattern.test(label));
+    // Where each password form would send its data; read the attribute, since an
+    // input named "action" shadows form.action.
+    const actions = {};
+    for (const f of fields) {
+      if (f.kind !== 'password' || !f.form || f.form in actions) continue;
+      try { actions[f.form] = new URL(byRef(f.form).getAttribute('action') || location.href, location.href).hostname; } catch {}
+    }
     return {
       url: location.href,
       host: location.hostname,
@@ -147,6 +154,7 @@
       error: errorText(),
       busy: [...document.querySelectorAll('[aria-busy=true], button[disabled][type=submit]')].some(visible),
       auth,
+      actions,
       paths: {
         email: (auth.login || auth.signup) && fields.some(f => ['email', 'username'].includes(f.kind)),
         password: fields.some(f => f.kind === 'password'),

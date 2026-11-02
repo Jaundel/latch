@@ -1,5 +1,5 @@
 // Popup pages load when opened; editing them does not replace the running worker.
-export const BUILD_FILES = ['manifest.json', 'background.js', 'page.js', 'id.js', 'build.js', 'domains.js', 'auth-result.js'];
+export const BUILD_FILES = ['manifest.json', 'background.js', 'page.js', 'id.js', 'build.js', 'domains.js', 'auth-result.js', 'guard.js'];
 
 export async function fingerprint(read) {
   const source = JSON.stringify(await Promise.all(BUILD_FILES.map(read)));

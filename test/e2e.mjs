@@ -61,7 +61,7 @@ const context = await chromium.launchPersistentContext(join(work, 'profile'), {
   channel: 'chromium',
   headless: process.env.HEADED !== '1',
   viewport: { width: 1100, height: 800 },
-  args: [`--disable-extensions-except=${ext}`, `--load-extension=${ext}`, '--host-resolver-rules=MAP plain.example 127.0.0.1'],
+  args: [`--disable-extensions-except=${ext}`, `--load-extension=${ext}`, '--host-resolver-rules=MAP plain.example 127.0.0.1, MAP collector.example 127.0.0.1'],
 });
 let [sw] = context.serviceWorkers();
 sw ??= await context.waitForEvent('serviceworker');
@@ -89,6 +89,11 @@ await adv.nth(1).fill(String(imap.port));
 await adv.nth(3).uncheck();
 await popup.screenshot({ path: join(out, 'popup-inbox.png') });
 await popup.click('form button[type=submit]');
+await popup.waitForSelector('h1:has-text("Connect your AI")', { timeout: 30000 });
+await popup.waitForSelector('.live.on');
+await popup.screenshot({ path: join(out, 'popup-connect.png') });
+check('setup ends on a live AI connection step', await popup.locator('.live.on').count() === 1);
+await popup.click('button:has-text("Done")');
 await popup.waitForSelector('.identity', { timeout: 30000 });
 check('setup completes in the popup', true);
 check('inbox password is verified live over IMAP', imapStats.logins >= 1, `${imapStats.logins} login`);
@@ -205,6 +210,13 @@ try {
   check('Workday-style sign-up behind a click overlay, verified by link', r.status === 'account_created' && r.verified === true && wdAcct?.verified, `${r.status} verified=${r.verified}`);
   check('Workday-style password meets every listed rule', wdAcct && [/\d/, /[a-z]/, /[A-Z]/, /[^A-Za-z0-9]/].every(re => re.test(wdAcct.password)) && wdAcct.password.length >= 8);
   await noLeak('after Workday-style sign-up', workday);
+
+  // 5b2. A sign-in form that would post the password to another site gets nothing, with no prompt.
+  const phish = await context.newPage();
+  await phish.goto(url('phish.localhost', '/login'));
+  r = await tool('sign_in', phish);
+  check('a form posting to another site is refused automatically', r.status === 'blocked' && r.reason === 'suspicious_site' && posts('collector.example') === 0, `${r.status}/${r.reason}`);
+  await noLeak('after refused phishing form', phish);
 
   // 5c. Oracle-style: email, then an emailed code; no password. Only the address says "sign-in".
   const oracle = await context.newPage();
@@ -332,9 +344,13 @@ try {
   const here = await context.newPage();
   await here.goto(url('oracle.localhost', '/sites/CX/my-profile/sign-in'));
   await here.bringToFront();
-  await popup.locator('button', { hasText: 'Sign in here' }).click();
-  await popup.locator('.notice.good, .notice.bad').filter({ hasNotText: 'Working' }).first().waitFor({ timeout: 90000 });
-  check('"Sign in here" in the popup signs in on the tab in front', new URL(here.url()).pathname === '/sites/CX/my-profile', await popup.locator('.notice').first().textContent());
+  await popup.reload();
+  await popup.locator('.page-title', { hasText: 'Sign-in page' }).waitFor({ timeout: 15000 });
+  check('the popup reads what the page in front offers', (await popup.locator('.page-host').textContent()) === 'oracle.localhost');
+  await popup.screenshot({ path: join(out, 'popup-page.png') });
+  await popup.locator('.page button.primary').click();
+  await popup.locator('.page .notice').waitFor({ timeout: 90000 });
+  check('the popup Sign in button signs in on the tab in front', new URL(here.url()).pathname === '/sites/CX/my-profile', await popup.locator('.page .notice').textContent());
   await noLeak('after popup sign-in', here);
 
   // 15. Paused from the popup.

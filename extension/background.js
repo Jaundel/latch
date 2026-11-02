@@ -5,6 +5,7 @@
 import { fingerprint } from './build.js';
 import { baseDomain, siteFor } from './domains.js';
 import { classifySignInError } from './auth-result.js';
+import { mainPasswordRisk } from './guard.js';
 
 const PORT = 47801;
 const loadedBuild = fingerprint(name => fetch(chrome.runtime.getURL(name)).then(response => response.text()));
@@ -147,7 +148,7 @@ async function onBridgeMessage(raw) {
   } else if (msg.type === 'reply') {
     bridge.replies.get(msg.id)?.(msg.result || {});
   } else if (msg.type === 'call') {
-    const result = await enqueue(() => runTool(msg.tool, msg.args || {}));
+    const result = await enqueue(() => runTool(msg.tool, msg.args || {}, String(msg.client || '').slice(0, 60)));
     send({ type: 'result', id: msg.id, result });
   }
 }
@@ -177,13 +178,14 @@ async function measured(phase, action) {
   finally { if (observation) observation[phase] += now() - started; }
 }
 
-async function snapshot(tabId) {
+// `observe: false` keeps a popup's look at a page out of a running tool call's evidence.
+async function snapshot(tabId, { observe = true } = {}) {
   const started = now();
   const target = { tabId, allFrames: true };
   await chrome.scripting.executeScript({ target, files: ['page.js'], injectImmediately: true }).catch(() => {});
   const results = await chrome.scripting.executeScript({ target, func: () => globalThis.__latch?.inspect() ?? null, injectImmediately: true }).catch(() => []);
   const snap = results.filter(r => r?.result).map(r => ({ frameId: r.frameId, ...r.result }));
-  if (observation) { observation.snap = snap; observation.detection_ms += now() - started; }
+  if (observation && observe) { observation.snap = snap; observation.detection_ms += now() - started; }
   return snap;
 }
 
@@ -335,10 +337,20 @@ function fits(password, fields) {
     && (!f.pattern || matchesPattern(f.pattern, password)));
 }
 
-async function credentialFor(ctx, host) {
+async function credentialFor(ctx, host, formActionHost = '') {
   const site = siteFor(ctx.vault, host);
   const main = ctx.vault.identity;
   if (site?.password) return { username: site.username || main.email, password: site.password, host: site.host };
+  // Nobody approves sign-ins, so the main password only goes where the page is what it claims to be.
+  const risk = mainPasswordRisk({ host, formActionHost, knownHosts: Object.keys(ctx.vault.sites), email: main.email });
+  if (risk) {
+    return {
+      blocked: {
+        status: 'blocked', reason: 'suspicious_site', site: host, retryable: false, next_action: 'open_official_sign_in',
+        message: `Latch did not fill the user's password because ${risk}. Do not enter credentials on this page; open the site's official sign-in page and call sign_in there.`,
+      },
+    };
+  }
   return { username: main.email, password: main.password, host };
 }
 
@@ -480,9 +492,9 @@ function redact(result, vault) {
   return out;
 }
 
-async function recordActivity(tool, result) {
+async function recordActivity(tool, result, client = '') {
   const { activity } = await getMeta();
-  activity.unshift({ at: now(), tool, site: result.site || '', status: result.status });
+  activity.unshift({ at: now(), tool, site: result.site || '', status: result.status, reason: result.reason || '', client });
   await chrome.storage.local.set({ activity: activity.slice(0, 50) });
   notifyPopup();
 }
@@ -527,8 +539,9 @@ async function signIn(ctx) {
         await clearAll(tabId);
         return { status: 'no_account', site: host, message: 'The site has no account for the user\'s email and is offering to create one. Call create_account on this page.' };
       }
-      const cred = await credentialFor(ctx, host);
       const pw = frame.fields.find(x => x.kind === 'password' && !x.confirm) || frame.fields.find(x => x.kind === 'password');
+      const cred = await credentialFor(ctx, host, frame.actions?.[pw.form]);
+      if (cred.blocked) { await clearAll(tabId); return cred.blocked; }
       const ident = frame.fields.filter(x => (x.kind === 'email' || x.kind === 'username') && (!pw.form || x.form === pw.form));
       const fills = [...ident.map(x => ({ ref: x.ref, value: cred.username })), { ref: pw.ref, value: cred.password }];
       const r = await inFrame(tabId, frame.frameId, 'fillAndSubmit', { fills, submitRef: pw.ref, purpose: 'login' });
@@ -638,7 +651,10 @@ async function createAccount(ctx) {
   let fresh = false;
   if (!password) {
     if (ctx.meta.settings.newPasswords === 'mine' || saved) {
-      password = (await credentialFor(ctx, host)).password;
+      const firstPw = frame.fields.find(x => x.kind === 'password');
+      const cred = await credentialFor(ctx, host, firstPw && frame.actions?.[firstPw.form]);
+      if (cred.blocked) return cred.blocked;
+      password = cred.password;
     } else {
       password = generatePassword(frame.fields.filter(x => x.kind === 'password'));
       fresh = true;
@@ -814,7 +830,7 @@ async function resolveTab(tabId) {
   return tab || null;
 }
 
-async function runTool(tool, args) {
+async function runTool(tool, args, client = '') {
   const started = now();
   observation = { snap: [], actions: [], detection_ms: 0, fill_submit_ms: 0, page_wait_ms: 0, verification_ms: 0 };
   let vault;
@@ -864,7 +880,7 @@ async function runTool(tool, args) {
     page_wait_ms: observation.page_wait_ms, verification_ms: observation.verification_ms };
   observation = null;
   result = redact(result, vault || emptyVault());
-  await recordActivity(tool, result).catch(() => {});
+  await recordActivity(tool, result, client).catch(() => {});
   return result;
 }
 
@@ -926,12 +942,30 @@ async function popupState() {
 
 const popupHandlers = {
   state: () => popupState(),
+  // What the page in front of the user offers, read without filling anything.
+  pageState: async () => {
+    const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    if (!tab || !/^https?:/.test(tab.url || '')) return { kind: 'blank', host: '' };
+    const snap = await snapshot(tab.id, { observe: false });
+    const frame = pickFrame(snap);
+    const st = stateOf(frame);
+    const host = frame?.host || hostOf(tab.url);
+    const vault = await readVault().catch(() => emptyVault());
+    let kind = 'none';
+    if (st === 'captcha') kind = 'captcha';
+    else if (st === 'code') kind = 'code';
+    else if (frame?.auth?.login && st !== 'none') kind = 'sign_in';
+    else if (frame?.auth?.signup && st !== 'none') kind = 'sign_up';
+    else if (flagged(snap, 'checkEmail')) kind = 'check_email';
+    else if (flagged(snap, 'signedIn')) kind = 'signed_in';
+    return { kind, host, saved: !!siteFor(vault, host)?.password };
+  },
   // The user runs a flow on the tab in front of them, exactly as the AI would.
   runHere: async ({ tool }) => {
     if (!['sign_in', 'create_account', 'verify_email'].includes(tool)) return { status: 'error', message: 'Unknown action.' };
     const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
     if (!tab || !/^https?:/.test(tab.url || '')) return { status: 'error', message: 'Open the site\'s page first.' };
-    return enqueue(() => runTool(tool, { tabId: tab.id }));
+    return enqueue(() => runTool(tool, { tabId: tab.id }, 'you'));
   },
   connect: () => { connect(); return {}; },
   provider: ({ email }) => detectProvider(email),

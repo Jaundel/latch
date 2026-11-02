@@ -437,3 +437,70 @@ details.adv[open] summary::before { content: "\2212  "; }
   border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--line));
 }
 .confirm p { margin: 0 0 10px; color: var(--fg-2); font-size: 12px; }
+
+/* This page: the first thing on the home screen */
+.page {
+  padding: 14px;
+  margin-bottom: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-2);
+}
+.page.loading { color: var(--fg-3); }
+.page-head { display: grid; grid-template-columns: 24px 1fr; gap: 10px; align-items: center; }
+.page-head:has(> :only-child) { grid-template-columns: 1fr; }
+.page-host { color: var(--fg-3); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.page-title { font-weight: 650; font-size: 15px; letter-spacing: -0.01em; }
+.page-sub { margin: 8px 0 12px; color: var(--fg-2); font-size: 12px; }
+.page .notice { margin: 10px 0 0; }
+.page .fav { background: var(--bg); }
+
+.identity { padding: 10px 12px; }
+.identity .avatar { width: 30px; height: 30px; font-size: 12px; }
+.identity { grid-template-columns: 30px 1fr auto; }
+
+.link.inline { font-size: inherit; color: var(--fg); text-decoration: underline; text-underline-offset: 2px; }
+.link.small { font-size: 12px; }
+.more { display: block; margin: 4px 0 0; }
+
+/* Activity */
+.act { grid-template-columns: 8px 1fr; }
+.tone { width: 8px; height: 8px; border-radius: 50%; background: var(--line-2); }
+.tone.good { background: var(--ok-dot); }
+.tone.wait { background: #d4a020; }
+.tone.bad { background: var(--danger); }
+
+/* Connect your AI */
+.live {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  background: var(--bg-2);
+  color: var(--fg-2);
+  font-weight: 550;
+}
+.live .dot { animation: pulse 1.4s ease-in-out infinite; }
+.live.on { color: var(--ok); }
+.live.on .dot { background: var(--ok-dot); animation: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok-dot) 18%, transparent); }
+@keyframes pulse { 50% { opacity: .35; } }
+
+.cmds { list-style: none; margin: 0 0 16px; padding: 0; display: grid; gap: 10px; }
+.cmd-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+.cmd-head b { font-weight: 600; font-size: 12px; }
+.cmds code {
+  display: block;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--bg-2);
+  font: 11.5px/1.45 ui-monospace, "Cascadia Mono", Consolas, monospace;
+  word-break: break-all;
+  user-select: all;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
+}
