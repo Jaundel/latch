@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Mailbox, startImap, startSites } from './fixture.js';
+import { fingerprint } from '../extension/build.js';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const out = join(root, 'test', 'output');
@@ -31,6 +32,7 @@ const note = (name, detail) => { checks.push({ name, ok: null, detail: String(de
 const work = mkdtempSync(join(tmpdir(), 'latch-e2e-'));
 const ext = join(work, 'extension');
 cpSync(join(root, 'extension'), ext, { recursive: true });
+const sourceBuild = await fingerprint(name => Promise.resolve(readFileSync(join(ext, name), 'utf8')));
 const bgPath = join(ext, 'background.js');
 writeFileSync(bgPath, readFileSync(bgPath, 'utf8').replace('const PORT = 47801;', `const PORT = ${TEST_PORT};`));
 
@@ -44,7 +46,7 @@ mailbox.add({ from: 'Jobs Board <no-reply@jobs.localhost>', to: MAIN.email, subj
 const transport = new StdioClientTransport({
   command: process.execPath,
   args: [join(root, 'server', 'index.js')],
-  env: { ...process.env, LATCH_PORT: String(TEST_PORT) },
+  env: { ...process.env, LATCH_PORT: String(TEST_PORT), LATCH_EXTENSION_DIR: ext },
   stderr: 'pipe',
 });
 let serverLog = '';
@@ -161,6 +163,7 @@ try {
   r = await tool('create_account', jobs);
   const jobsAcct = sites.accounts.get(`jobs.localhost|${MAIN.email}`);
   check('create_account with emailed code', r.status === 'account_created' && r.verified === true, `${r.status} verified=${r.verified}`);
+  check('creation, verification and session are reported separately', r.account?.creation === 'created' && r.account?.email_verification === 'verified' && r.account?.session === 'signed_in');
   check('site has exactly one verified account', jobsAcct?.verified === true && posts('jobs.localhost', '/signup') === 1);
   check('new account got a unique generated password', jobsAcct && jobsAcct.password !== MAIN.password && jobsAcct.password.length >= 16);
   check('stale and other-site codes were ignored', jobs.url().endsWith('/dashboard'), new URL(jobs.url()).pathname);
@@ -203,6 +206,41 @@ try {
   check('Workday-style password meets every listed rule', wdAcct && [/\d/, /[a-z]/, /[A-Z]/, /[^A-Za-z0-9]/].every(re => re.test(wdAcct.password)) && wdAcct.password.length >= 8);
   await noLeak('after Workday-style sign-up', workday);
 
+  // 5c. Oracle-style: email, then an emailed code; no password. Only the address says "sign-in".
+  const oracle = await context.newPage();
+  await oracle.goto(url('oracle.localhost', '/sites/CX/my-profile/sign-in'));
+  r = await tool('sign_in', oracle);
+  check('Oracle-style passwordless sign-in with an emailed code', r.status === 'signed_in' && new URL(oracle.url()).pathname === '/sites/CX/my-profile', `${r.status} at ${new URL(oracle.url()).pathname}`);
+  check('Oracle-style honeypot is never filled', !sites.oracleHoneypot);
+  await noLeak('after Oracle-style sign-in', oracle);
+
+  // 5d. Taleo-style: registration asks for a user name; later sign-in is by user name.
+  const taleo = await context.newPage();
+  await taleo.goto(url('taleo.localhost', '/careersection/register'));
+  await taleo.check('#privacy');
+  r = await tool('create_account', taleo);
+  const taleoAcct = sites.accounts.get(`taleo.localhost|${MAIN.email}`);
+  check('Taleo-style registration fills user name, email and both confirmations', r.status === 'account_created' && taleoAcct?.username === MAIN.email, r.status);
+  await taleo.goto(url('taleo.localhost', '/careersection/logout'));
+  r = await tool('sign_in', taleo);
+  check('Taleo-style sign-in by user name', r.status === 'signed_in' && new URL(taleo.url()).pathname === '/careersection/myaccount' && posts('taleo.localhost', '/login') === 1, r.status);
+  await noLeak('after Taleo-style sign-in', taleo);
+
+  // 5e. iCIMS-style universal login: email first, then either a password page or a new-account page.
+  const icims = await context.newPage();
+  await icims.goto(url('login.icims.localhost', '/u/login/identifier'));
+  r = await tool('sign_in', icims);
+  check('email-first sign-in with no account stops and says so', r.status === 'no_account' && posts('login.icims.localhost') === 0, r.status);
+  await icims.goto(url('login.icims.localhost', '/u/login/identifier'));
+  r = await tool('create_account', icims);
+  const icimsAcct = sites.accounts.get(`login.icims.localhost|${MAIN.email}`);
+  check('iCIMS-style sign-up from the email-first page, verified by link', r.status === 'account_created' && r.verified === true && icimsAcct?.verified, `${r.status} verified=${r.verified}`);
+  await icims.goto(url('login.icims.localhost', '/u/logout'));
+  r = await tool('sign_in', icims);
+  check('iCIMS-style two-page sign-in', r.status === 'signed_in' && new URL(icims.url()).pathname === '/portal', r.status);
+  check('no "Continue with Google/Indeed/..." button was ever pressed', !sites.socialClicks);
+  await noLeak('after iCIMS-style sign-in', icims);
+
   // 6. Two-step single-page login with a controlled input, and a 6-box emailed code.
   const steps = await context.newPage();
   await steps.goto(url('steps.localhost', '/login'));
@@ -217,6 +255,20 @@ try {
   r = await tool('sign_in', wrong);
   check('wrong password is reported', r.status === 'wrong_password', r.status);
   await noLeak('after wrong password', wrong);
+
+  const ambiguous = await context.newPage();
+  await ambiguous.goto(url('ambiguous.localhost', '/login'));
+  r = await tool('sign_in', ambiguous);
+  check('mixed Workday rejection does not diagnose password or lockout', r.status === 'credentials_or_account_problem' && r.retryable === false, r.status);
+  check('ambiguous rejection keeps account existence and verification unknown', r.account?.creation === 'unknown' && r.account?.email_verification === 'unknown' && r.account?.session === 'unknown');
+  check('rejection preserves sanitized site wording', r.message.includes('might be locked') && r.message.includes('[hidden]'));
+  check('agent receives visible alternative paths and rejection evidence', r.paths?.google === true && r.evidence?.error_observed === true && r.evidence?.actions.includes('login_submit'));
+  check('tool timing identifies its own measured scope', r.timings?.total_ms >= r.timings?.fill_submit_ms && r.timings?.detection_ms >= 0);
+  r = await tool('sign_in', ambiguous);
+  check('immediate repeat is blocked without another credential submission', r.status === 'retry_blocked' && posts('ambiguous.localhost') === 1, r.status);
+  // This fixture deliberately echoes the submitted email in its own error.
+  // Latch can scrub its result and fields, not the site's rendered error text.
+  check('rejection clears credential fields', await ambiguous.inputValue('#e') === '' && await ambiguous.inputValue('#p') === '');
 
   // 8. CAPTCHA: stop before filling anything.
   const captcha = await context.newPage();
@@ -269,6 +321,22 @@ try {
   const filled = await apply.inputValue('#ae');
   check('fill_email types the address into the focused field', r.status === 'filled' && filled === MAIN.email, r.status);
 
+  for (const name of ['sign_in', 'create_account']) {
+    await apply.reload();
+    r = await tool(name, apply);
+    check(`${name} refuses an application form without filling or submitting`, r.status === 'no_form' && await apply.inputValue('#ae') === '' && posts('jobs.localhost', '/submit-application') === 0, r.status);
+    await noLeak(`after application ${name}`, apply);
+  }
+
+  // 14b. The user can run the same flow from the popup on the tab in front of them.
+  const here = await context.newPage();
+  await here.goto(url('oracle.localhost', '/sites/CX/my-profile/sign-in'));
+  await here.bringToFront();
+  await popup.locator('button', { hasText: 'Sign in here' }).click();
+  await popup.locator('.notice.good, .notice.bad').filter({ hasNotText: 'Working' }).first().waitFor({ timeout: 90000 });
+  check('"Sign in here" in the popup signs in on the tab in front', new URL(here.url()).pathname === '/sites/CX/my-profile', await popup.locator('.notice').first().textContent());
+  await noLeak('after popup sign-in', here);
+
   // 15. Paused from the popup.
   await popup.locator('.foot .switch').click();
   await sleep(300);
@@ -296,17 +364,29 @@ try {
   await popup.screenshot({ path: join(out, 'popup-home-dark.png') });
   await popup.emulateMedia({ colorScheme: 'light' });
 
+  // File updates must be reported before any credentials are filled. Reloading a
+  // running MV3 worker automatically can disconnect it and close extension pages.
+  const reloadPage = await context.newPage();
+  await reloadPage.goto(url('jobs.localhost', '/apply'));
+  await reloadPage.click('#ae');
+  const pagePath = join(ext, 'page.js');
+  writeFileSync(pagePath, readFileSync(pagePath, 'utf8') + '\n// update regression\n');
+  const reloadResult = await tool('fill_email', reloadPage);
+  check('updated extension requires reload before any credential operation', reloadResult.status === 'reload_required' && await reloadPage.inputValue('#ae') === '', reloadResult.status);
+  check('update handoff leaves the extension connected', context.serviceWorkers().includes(sw) && !popup.isClosed());
+  await reloadPage.close();
+
   // ---------- global checks
   const results = transcript.map(t => t.text).join('\n');
   check('no tool result contained the email, passwords, codes or tokens', leaksIn(results).length === 0, `${transcript.length} results`);
   check('server log contains nothing private', leaksIn(serverLog).length === 0);
   const stored = await popup.evaluate(async () => JSON.stringify(await chrome.storage.local.get(null)));
   check('saved data is encrypted at rest', leaksIn(stored).length === 0 && stored.includes('"vault"'));
-  check('only matching messages were opened in full', imapStats.bodiesRead <= 12, `${imapStats.bodiesRead} bodies`);
+  check('only likely matches are opened in full (at most 2 per inbox search)', imapStats.bodiesRead <= 2 * imapStats.searches, `${imapStats.bodiesRead} bodies over ${imapStats.searches} searches`);
 } catch (err) {
   check('test run finished without crashing', false, err.stack?.split('\n').slice(0, 3).join(' | '));
 } finally {
-  writeFileSync(join(out, 'e2e.json'), JSON.stringify({ at: new Date().toISOString(), checks, transcript }, null, 2));
+  writeFileSync(join(out, 'e2e.json'), JSON.stringify({ at: new Date().toISOString(), sourceBuild, checks, transcript }, null, 2));
   await context.close().catch(() => {});
   await mcp.close().catch(() => {});
   imap.server.close();

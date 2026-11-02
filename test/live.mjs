@@ -69,6 +69,7 @@ const control = createServer(async (req, res) => {
         toolCalls: calls.length,
         leaksInToolResults: calls.reduce((n, c) => n + c.leaks, 0),
         leaksInServerLog: leakCount(serverLog),
+        bridgeLog: serverLog.split('\n').filter(line => /^latch: (listening|relaying|extension (connected|ready)|(?:sign_in|create_account|verify_email|fill_email) ->)/.test(line)).slice(-15),
       });
     }
     if (req.url === '/stop') {

@@ -192,6 +192,29 @@ function siteRow(site) {
   return row;
 }
 
+// Run Latch on the page in front of the user, the same way the AI's tools do.
+// The outcome lives in `tabRun` so the periodic redraw keeps it on screen.
+let tabRun = null;   // { busy } or { status, message }
+
+function thisTab() {
+  const run = (tool, label) => h('button', {
+    class: 'btn small', type: 'button', disabled: !!tabRun?.busy,
+    onclick: async () => {
+      tabRun = { busy: true };
+      render();
+      tabRun = await call('runHere', { tool });
+      await refresh();
+      render();
+    },
+  }, label);
+  const good = tabRun && /^(signed_in|account_created|verified|filled)$/.test(tabRun.status);
+  return h('div', {},
+    h('div', { class: 'section-head' }, h('h2', {}, 'This tab')),
+    h('div', { class: 'actions', style: 'margin:0 0 6px' }, run('sign_in', 'Sign in here'), run('create_account', 'Create account here'), run('verify_email', 'Verify email')),
+    h('p', { class: `notice${tabRun?.busy ? '' : good ? ' good' : tabRun ? ' bad' : ''}`, role: 'status' },
+      tabRun?.busy ? 'Working on this tab…' : tabRun ? tabRun.message || tabRun.status : ''));
+}
+
 function homeScreen() {
   const s = state;
   const inbox = s.mailbox ? 'Inbox connected' : h('span', { class: 'warn' }, 'Inbox not connected');
@@ -212,6 +235,8 @@ function homeScreen() {
   if (!s.connected) {
     parts.push(h('div', { class: 'banner' }, 'Waiting for your AI. Latch connects when Claude or Codex starts with the Latch tool added.'));
   }
+
+  parts.push(thisTab());
 
   parts.push(h('div', { class: 'section-head' }, h('h2', {}, 'Sites'), s.sites.length ? h('span', {}, String(s.sites.length)) : null));
   parts.push(s.sites.length

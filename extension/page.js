@@ -97,10 +97,10 @@
       passkey: /passkey|security key|windows hello|face id|touch id|use your device/.test(body),
       push: /approve (the )?(sign-?in|request)|tap yes|check your (phone|device) for|sent a notification/.test(body),
       checkEmail: /check your (e-?mail|inbox)|verify your (e-?mail|account)|confirm your (e-?mail|account)|(sent|emailed) you (a|an) (verification |confirmation |activation )?(link|email)|(link|email) (has been )?sent to/.test(body),
-      exists: /already (exists|registered|in use|taken|have an account|associated)|account with (this|that) e-?mail/.test(body),
+      exists: /already (exists|registered|in use|taken|associated)|account (already )?exists|account with (this|that) e-?mail/.test(body),
       locked: /too many (attempts|tries)|account (is )?(locked|disabled|suspended)|temporarily (locked|blocked)/.test(body),
       signedIn: [...document.querySelectorAll('a, button, [role=button], [role=menuitem]')].slice(0, 400)
-        .some(el => /^(sign|log) ?out$/i.test(textOf(el))),
+        .some(el => visible(el) && (/^(sign|log) ?out$/i.test(textOf(el)) || el.matches('#accountSettingsButton, [data-automation-id="accountSettingsButton"]'))),
     };
   }
 
@@ -131,6 +131,10 @@
     }
     const active = document.activeElement;
     const focused = active && active.tagName === 'INPUT' && fields.find(f => byRef(f.ref) === active);
+    const auth = authIntents(fields);
+    const choices = [...document.querySelectorAll('a, button, [role=button], input[type=submit], input[type=button]')]
+      .filter(visible).map(el => el.tagName === 'INPUT' ? el.value : textOf(el));
+    const offers = pattern => choices.some(label => pattern.test(label));
     return {
       url: location.href,
       host: location.hostname,
@@ -141,7 +145,20 @@
       captcha: captchaBlocking(),
       flags: pageFlags(),
       error: errorText(),
-      busy: !!document.querySelector('[aria-busy=true], button[disabled][type=submit]'),
+      busy: [...document.querySelectorAll('[aria-busy=true], button[disabled][type=submit]')].some(visible),
+      auth,
+      paths: {
+        email: (auth.login || auth.signup) && fields.some(f => ['email', 'username'].includes(f.kind)),
+        password: fields.some(f => f.kind === 'password'),
+        google: offers(/(?:with|using|via)\s+google/i),
+        linkedin: offers(/(?:with|using|via)\s+linkedin/i),
+        microsoft: offers(/(?:with|using|via)\s+microsoft/i),
+        apple: offers(/(?:with|using|via)\s+apple/i),
+        facebook: offers(/(?:with|using|via)\s+facebook/i),
+        sso: offers(/\bsso\b|single sign.on|corporate login/i),
+        create_account: auth.signup || offers(/create\b.{0,30}\baccount|sign ?up|register/i),
+        guest: offers(/(?:as (?:a )?guest|guest (?:access|checkout|application)|apply without (?:an )?account)/i),
+      },
     };
   }
 
@@ -153,8 +170,10 @@
     el.blur();
   }
 
-  const BUTTONS = 'button, input[type=submit], input[type=image], [role=button], a[role=button]';
-  const ELSEWHERE = /google|apple|facebook|microsoft|github|linkedin|twitter|\bx\b|sso|single sign|passkey|forgot|reset|cancel|back|show|hide|eye|visibility|help/i;
+  const BUTTONS = 'button, input[type=submit], input[type=button], input[type=image], [role=button], a[role=button]';
+  const buttonLabel = el => ((el.tagName === 'INPUT' ? el.value : textOf(el)) || el.getAttribute('aria-label') || el.value || '').trim();
+  const NON_AUTH_ACTION = /\bapplication\b|\bresume\b|\bsubscribe\b|\bnewsletter\b|\bapply\b/i;
+  const ELSEWHERE = /google|apple|facebook|microsoft|github|linkedin|twitter|indeed|corporate|\bx\b|sso|single sign|passkey|forgot|reset|cancel|back|show|hide|eye|visibility|help/i;
   const INTENT = {
     login: { good: /sign ?in|log ?in|continue|next|submit|verify|confirm|go\b/i, bad: /sign ?up|create|register|join/i },
     signup: { good: /create|sign ?up|register|join|continue|next|submit|get started|agree|verify|confirm/i, bad: /sign ?in|log ?in/i },
@@ -163,9 +182,10 @@
 
   function findSubmit(anchor, purpose) {
     const { good, bad } = INTENT[purpose] || INTENT.login;
-    const label = el => (el.value || textOf(el) || el.getAttribute('aria-label') || '').trim();
-    const usable = el => visible(el) && !el.disabled && !ELSEWHERE.test(label(el)) && !bad.test(label(el));
-    const scopes = [anchor?.form, anchor?.closest('[role=dialog], form, section, main'), document].filter(Boolean);
+    const label = buttonLabel;
+    const usable = el => visible(el) && !el.disabled && !ELSEWHERE.test(label(el)) && !bad.test(label(el)) && !NON_AUTH_ACTION.test(label(el));
+    // An unrelated header login must never be used to submit a different form.
+    const scopes = anchor?.form ? [anchor.form] : [anchor?.closest('[role=dialog], [role=form], section, main') || document];
     for (const scope of scopes) {
       const buttons = [...scope.querySelectorAll(BUTTONS)].filter(usable);
       const typed = buttons.find(b => b.type === 'submit' && (anchor?.form ? b.form === anchor.form : true));
@@ -174,6 +194,30 @@
       if (named) return named;
     }
     return null;
+  }
+
+  function authIntents(fields) {
+    const passwords = fields.filter(f => f.kind === 'password');
+    const first = passwords[0] || fields.find(f => ['email', 'username'].includes(f.kind));
+    const anchor = first && byRef(first.ref);
+    if (!anchor) return { login: false, signup: false };
+    const scope = anchor.form || anchor.closest('[role=dialog], [role=form], section, main') || document;
+    const buttonText = purpose => {
+      const button = findSubmit(anchor, purpose);
+      return button ? buttonLabel(button) : '';
+    };
+    const heads = [document.title, ...[...(scope.closest?.('main, section, [role=dialog]') || document).querySelectorAll('h1,h2,h3')]
+      .filter(visible).map(textOf), (location.pathname + location.hash).replace(/[-_/#]+/g, ' ')].join(' ');
+    const loginButton = buttonText('login');
+    const signupButton = buttonText('signup');
+    const login = /sign ?in|log ?in|welcome back|enter your (e-?mail|password)/i;
+    const signup = /sign ?up|create\b.{0,50}\baccount|register|join (us|now)/i;
+    const isNew = passwords.some(f => f.isNew || f.confirm);
+    return {
+      login: !!loginButton && (login.test(loginButton) || (!isNew && (passwords.length > 0 || login.test(heads)))),
+      // A plain password box next to both "Login" and "Create a New Account" (Taleo) is a sign-in form.
+      signup: !!signupButton && (isNew || ((signup.test(signupButton) || signup.test(heads)) && !(passwords.length && login.test(loginButton)))),
+    };
   }
 
   // Press whatever sits on top at the button's centre, as a real click would.
@@ -225,6 +269,10 @@
   // Fill and submit in one synchronous task, so no other script on the page
   // can run between the password going in and the form being sent.
   function fillAndSubmit({ fills, submitRef, purpose, validate }) {
+    // Check before credentials enter the page. Email fields alone are not login forms.
+    if (['login', 'signup'].includes(purpose) && !inspect().auth[purpose]) {
+      return { ok: false, noForm: true };
+    }
     const ours = new Set();
     for (const f of fills) {
       const el = byRef(f.ref);

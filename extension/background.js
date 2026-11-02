@@ -2,25 +2,16 @@
 // sign-in, sign-up and verification flows in the AI's tab. Results sent back to
 // the server carry statuses only, never credentials or codes.
 
+import { fingerprint } from './build.js';
+import { baseDomain, siteFor } from './domains.js';
+import { classifySignInError } from './auth-result.js';
+
 const PORT = 47801;
-const LOADED_AT = Date.now();
+const loadedBuild = fingerprint(name => fetch(chrome.runtime.getURL(name)).then(response => response.text()));
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const now = () => Date.now();
 
 // ---------- domains
-
-const TWO_PART_TLDS = new Set([
-  'co.uk', 'org.uk', 'ac.uk', 'gov.uk', 'com.au', 'net.au', 'org.au', 'co.nz', 'co.jp', 'co.in',
-  'com.br', 'com.mx', 'co.za', 'com.sg', 'com.hk', 'com.tr', 'com.cn', 'co.kr', 'com.ar', 'on.ca',
-]);
-
-function baseDomain(host) {
-  host = String(host || '').toLowerCase();
-  if (/^[\d.]+$/.test(host) || host.includes(':')) return host;
-  const parts = host.split('.');
-  if (parts.length <= 2) return host;
-  return parts.slice(TWO_PART_TLDS.has(parts.slice(-2).join('.')) ? -3 : -2).join('.');
-}
 
 function insecure(url) {
   try {
@@ -152,7 +143,7 @@ async function onBridgeMessage(raw) {
   if (msg.type === 'hello') {
     bridge.clients = (msg.clients || []).map(c => String(c).slice(0, 60)).slice(0, 8);
     notifyPopup();
-    await reloadIfStale(Number(msg.stamp) || 0);
+    send({ type: 'ready', build: await loadedBuild });
   } else if (msg.type === 'reply') {
     bridge.replies.get(msg.id)?.(msg.result || {});
   } else if (msg.type === 'call') {
@@ -168,16 +159,6 @@ chrome.runtime.onStartup.addListener(connect);
 chrome.runtime.onInstalled.addListener(connect);
 connect();
 
-// The files on disk changed after this copy started: reload once so Chrome runs the new code.
-async function reloadIfStale(stamp) {
-  if (!stamp || stamp <= LOADED_AT || stamp > Date.now()) return;
-  const { reloadedFor } = await chrome.storage.local.get('reloadedFor');
-  if (reloadedFor === stamp) return;
-  await chrome.storage.local.set({ reloadedFor: stamp });
-  await queue;
-  chrome.runtime.reload();
-}
-
 let queue = Promise.resolve();
 function enqueue(fn) {
   const run = queue.then(fn, fn);
@@ -187,24 +168,42 @@ function enqueue(fn) {
 
 // ---------- page access
 
+let observation = null; // Tools execute serially; contains metadata only, never field values.
+const authBackoff = new Map();
+
+async function measured(phase, action) {
+  const started = now();
+  try { return await action(); }
+  finally { if (observation) observation[phase] += now() - started; }
+}
+
 async function snapshot(tabId) {
+  const started = now();
   const target = { tabId, allFrames: true };
-  await chrome.scripting.executeScript({ target, files: ['page.js'] }).catch(() => {});
-  const results = await chrome.scripting.executeScript({ target, func: () => globalThis.__latch?.inspect() ?? null }).catch(() => []);
-  return results.filter(r => r?.result).map(r => ({ frameId: r.frameId, ...r.result }));
+  await chrome.scripting.executeScript({ target, files: ['page.js'], injectImmediately: true }).catch(() => {});
+  const results = await chrome.scripting.executeScript({ target, func: () => globalThis.__latch?.inspect() ?? null, injectImmediately: true }).catch(() => []);
+  const snap = results.filter(r => r?.result).map(r => ({ frameId: r.frameId, ...r.result }));
+  if (observation) { observation.snap = snap; observation.detection_ms += now() - started; }
+  return snap;
 }
 
 async function inFrame(tabId, frameId, op, arg) {
+  const started = now();
   const [res] = await chrome.scripting.executeScript({
     target: { tabId, frameIds: [frameId] },
+    injectImmediately: true,
     func: (op, arg) => globalThis.__latch?.[op]?.(arg) ?? { ok: false },
     args: [op, arg],
   }).catch(() => []);
+  if (observation && ['fillAndSubmit', 'fillCode'].includes(op)) {
+    observation.fill_submit_ms += now() - started;
+    if (res?.result?.ok) observation.actions.push(op === 'fillCode' ? 'verification_submit' : `${arg.purpose}_submit`);
+  }
   return res?.result;
 }
 
 async function clearAll(tabId) {
-  await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, func: () => globalThis.__latch?.clearFilled(true) }).catch(() => {});
+  await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, func: () => globalThis.__latch?.clearFilled(true), injectImmediately: true }).catch(() => {});
 }
 
 async function tabReady(tabId, ms = 8000) {
@@ -220,10 +219,10 @@ async function tabReady(tabId, ms = 8000) {
 
 async function waitForFields(tabId, ms = 6000) {
   const end = now() + ms;
-  await tabReady(tabId);
   let snap = [];
   while (now() < end) {
     snap = await snapshot(tabId);
+    if (snap.some(f => f.flags?.signedIn)) return snap;
     if (snap.some(f => f.fields.length || f.digits.length)) {
       // Give auto-solving CAPTCHAs (Turnstile and similar) a moment before treating them as blocking.
       if (!snap.some(f => f.captcha)) return snap;
@@ -233,13 +232,17 @@ async function waitForFields(tabId, ms = 6000) {
   return snap;
 }
 
-const signature = snap => snap.map(f => [
-  f.frameId, f.url.split('#')[0], f.fields.map(x => x.kind).join(','), f.digits.length,
-  f.error, f.captcha, f.busy, f.flags.checkEmail, f.flags.signedIn,
-].join('|')).join('||');
+const signature = snap => {
+  const f = pickFrame(snap);
+  return f ? [
+    f.frameId, f.url.split('#')[0], f.fields.map(x => x.kind).join(','), f.digits.length,
+    f.error, f.captcha, f.busy, f.flags.checkEmail, f.flags.signedIn,
+  ].join('|') : '';
+};
 
 // Wait until the page has changed from `before` and stopped changing.
-async function settle(tabId, before, ms = 12000) {
+const settle = (tabId, before, ms = 40000) => measured('page_wait_ms', () => settlePage(tabId, before, ms));
+async function settlePage(tabId, before, ms) {
   const end = now() + ms;
   let last = null;
   let snap = [];
@@ -247,14 +250,17 @@ async function settle(tabId, before, ms = 12000) {
   while (now() < end) {
     const tab = await chrome.tabs.get(tabId).catch(() => null);
     if (!tab) return [];
-    if (tab.status === 'complete') {
-      snap = await snapshot(tabId);
-      const sig = signature(snap);
-      const busy = snap.some(f => f.busy);
-      if (snap.length && sig !== before && !busy) {
-        if (sig === last) return snap;
-        last = sig;
-      }
+    snap = await snapshot(tabId);
+    const sig = signature(snap);
+    const frame = pickFrame(snap);
+    const busy = frame?.busy;
+    // Redirects and client-rendered forms can briefly have no inputs at all.
+    // Only settle on a usable next step or explicit terminal evidence.
+    const actionable = stateOf(frame) !== 'none' || frame?.error ||
+      ['signedIn', 'checkEmail', 'passkey', 'push', 'locked', 'exists'].some(flag => flagged(snap, flag));
+    if (snap.length && sig !== before && !busy && actionable) {
+      if (sig === last) return snap;
+      last = sig;
     }
     await sleep(350);
   }
@@ -329,13 +335,6 @@ function fits(password, fields) {
     && (!f.pattern || matchesPattern(f.pattern, password)));
 }
 
-function siteFor(vault, host) {
-  if (vault.sites[host]) return { host, ...vault.sites[host] };
-  const base = baseDomain(host);
-  const same = Object.entries(vault.sites).filter(([h, s]) => baseDomain(h) === base && s.password);
-  return same.length === 1 ? { host: same[0][0], ...same[0][1] } : null;
-}
-
 async function credentialFor(ctx, host) {
   const site = siteFor(ctx.vault, host);
   const main = ctx.vault.identity;
@@ -399,7 +398,8 @@ async function inboxFallback(ctx, host, kind) {
     site: host,
     ...(inbox ? { inbox } : {}),
     message: `${host} emailed the user ${kind === 'link' ? 'a confirmation link' : 'a verification code'}, and Latch is not connected to their inbox, ` +
-      `so get it yourself: ${where}, open only the newest message from ${host}, ${step}. Then carry on in tab ${ctx.tabId}.`,
+      `so fetch only its newest matching verification message using a connected mail tool if available; otherwise ${where}. ` +
+      `Then ${step}. Carry on in tab ${ctx.tabId}; the user does not need to fetch the email.`,
   };
 }
 
@@ -412,7 +412,8 @@ async function openPrivately(ctx, url) {
 }
 
 // Fill a code the site asked for. Returns a final result if it cannot continue, otherwise null.
-async function enterCode(ctx, frame) {
+const enterCode = (ctx, frame) => measured('verification_ms', () => enterCodeStep(ctx, frame));
+async function enterCodeStep(ctx, frame) {
   const host = frame.host;
   const f = frame.flags;
   if (f.phoneCode && !f.emailCode) {
@@ -435,7 +436,8 @@ async function enterCode(ctx, frame) {
   return null;
 }
 
-async function confirmByLink(ctx, host) {
+const confirmByLink = (ctx, host) => measured('verification_ms', () => confirmByLinkStep(ctx, host));
+async function confirmByLinkStep(ctx, host) {
   if (!ctx.vault.mailbox) return { result: await mailProblem(ctx, {}, host, 'link') };
   const mail = await fetchMail(ctx, host, 'link');
   if (!mail.found || !mail.link) return { result: await mailProblem(ctx, mail, host, 'link') };
@@ -493,6 +495,15 @@ async function signIn(ctx) {
   let frame = pickFrame(snap);
   let state = stateOf(frame);
   const tabHost = hostOf(ctx.tab.url);
+  if (flagged(snap, 'signedIn') && !frame?.auth?.login) {
+    return { status: 'signed_in', site: tabHost, message: 'This tab already looks signed in.' };
+  }
+  const retryAt = authBackoff.get(frame?.host) || 0;
+  if (retryAt > now()) return { status: 'retry_blocked', site: frame.host, retryable: false, next_action: 'inspect_alternative_paths',
+    message: 'A recent credential rejection may indicate an account problem. Latch blocks another automatic attempt for 60 seconds; inspect the available sign-in routes instead.' };
+  if (['identifier', 'password'].includes(state) && !frame.auth?.login) {
+    return { status: 'no_form', site: tabHost, message: 'No sign-in form found. This may be an application form; use fill_email to fill its email field without submitting it.' };
+  }
   if (state === 'none') {
     if (flagged(snap, 'signedIn')) return { status: 'signed_in', site: tabHost, message: 'This tab already looks signed in.' };
     return { status: 'no_form', site: tabHost, message: 'No sign-in form found in this tab. Open the site\'s sign-in page, then call sign_in again.' };
@@ -512,6 +523,10 @@ async function signIn(ctx) {
       last = { action: 'code', host };
     } else if (state === 'password') {
       if (last?.action === 'password' && last.host === host) return loginFailed(ctx, frame);
+      if (frame.fields.some(x => x.kind === 'password' && (x.isNew || x.confirm)) && !frame.auth?.login) {
+        await clearAll(tabId);
+        return { status: 'no_account', site: host, message: 'The site has no account for the user\'s email and is offering to create one. Call create_account on this page.' };
+      }
       const cred = await credentialFor(ctx, host);
       const pw = frame.fields.find(x => x.kind === 'password' && !x.confirm) || frame.fields.find(x => x.kind === 'password');
       const ident = frame.fields.filter(x => (x.kind === 'email' || x.kind === 'username') && (!pw.form || x.form === pw.form));
@@ -520,7 +535,7 @@ async function signIn(ctx) {
       if (!r?.ok) return changedUnderneath(host, 'sign_in');
       last = { action: 'password', host, credHost: cred.host };
     } else if (state === 'identifier') {
-      if (last && last.action !== 'identifier' && (frame.flags.signedIn || !frame.flags.loginish)) return signedIn(ctx, host, last);
+      if (last && last.action !== 'identifier' && frame.flags.signedIn && !frame.auth?.login) return signedIn(ctx, host, last);
       if (last?.action === 'identifier' && last.host === host) return loginFailed(ctx, frame);
       const site = siteFor(ctx.vault, host);
       const field = frame.fields.find(x => x.kind === 'email') || frame.fields.find(x => x.kind === 'username');
@@ -539,7 +554,10 @@ async function signIn(ctx) {
         if (link.result) return link.result;
         return signedIn(ctx, host, last);
       }
-      return signedIn(ctx, host, last);
+      if (flagged(snap, 'signedIn')) return signedIn(ctx, host, last);
+      if (frame?.error) return loginFailed(ctx, frame);
+      await clearAll(tabId);
+      return { status: 'unconfirmed', site: host, message: 'The sign-in form disappeared, but Latch found no authenticated account control. Inspect the tab before continuing; do not assume sign-in succeeded.' };
     }
     snap = await settle(tabId, before);
     frame = pickFrame(snap);
@@ -553,19 +571,27 @@ async function signedIn(ctx, host, last) {
   await clearAll(ctx.tabId);
   const siteHost = last?.credHost || host;
   await rememberSite(siteHost, { lastUsed: now(), status: 'active' });
-  return { status: 'signed_in', site: host, message: 'Signed in. Continue your task in this tab.' };
+  return { status: 'signed_in', site: host, ...(ctx.verified ? { verified: true } : {}), message: 'Signed in. Continue your task in this tab.' };
 }
 
 async function loginFailed(ctx, frame) {
   await clearAll(ctx.tabId);
   const host = frame.host;
-  const err = (frame.error || '').toLowerCase();
-  if (frame.flags.locked) return needsUser('locked', host, 'The site says the account is locked or rate-limited. Ask the user to check it.');
-  if (/no account|not found|does ?n.?t exist|could ?n.?t find|not registered|no user/.test(err)) {
+  const status = classifySignInError(frame.error, frame.flags.locked);
+  if (['credentials_or_account_problem', 'wrong_password', 'locked'].includes(status)) {
+    authBackoff.set(host, now() + 60000);
+    if (authBackoff.size > 100) authBackoff.delete(authBackoff.keys().next().value);
+  }
+  if (status === 'locked') return { ...needsUser('locked', host, 'The site says the account is locked or rate-limited. Stop sign-in attempts.'), retryable: false };
+  if (status === 'credentials_or_account_problem') {
+    return { status, site: host, retryable: false, next_action: 'inspect_alternative_paths',
+      message: `The site could not authenticate this account; it did not establish whether the email, password, or account state caused the failure. Do not retry automatically.${siteSaid(frame.error)}` };
+  }
+  if (status === 'no_account') {
     return { status: 'no_account', site: host, message: 'The site says there is no account for the user\'s email. Use create_account on its sign-up page if you mean to make one.' };
   }
-  if (/incorrect|invalid|wrong|did ?n.?t match|does ?n.?t match|not recogni[sz]ed/.test(err)) {
-    return { status: 'wrong_password', site: host, message: 'The site rejected the saved password. Ask the user to update it in Latch or sign in themselves.' };
+  if (status === 'wrong_password') {
+    return { status, site: host, retryable: false, message: `The site explicitly rejected the password. Do not retry the same credential automatically.${siteSaid(frame.error)}` };
   }
   return { status: 'sign_in_failed', site: host, message: `The site did not accept the sign-in.${siteSaid(frame.error)}` };
 }
@@ -596,6 +622,11 @@ async function createAccount(ctx) {
     return { status: 'no_form', site: hostOf(ctx.tab.url), message: 'No sign-up form found in this tab. Open the site\'s sign-up page, then call create_account again.' };
   }
   const host = frame.host;
+  // Email-first sites (iCIMS) ask for the email before deciding between sign-in and sign-up.
+  const emailFirst = state === 'identifier' && frame.auth?.login;
+  if (['identifier', 'password'].includes(state) && !frame.auth?.signup && !emailFirst) {
+    return { status: 'no_form', site: host, message: 'No sign-up form found. This may be an application form; use fill_email to fill its email field without submitting it.' };
+  }
   if (insecure(frame.url)) return blocked(host);
   if (state === 'captcha') return needsUser('captcha', host, 'The site is showing a CAPTCHA. Ask the user to solve it in the tab, then call create_account again.');
   await markStart(host);
@@ -629,6 +660,11 @@ async function createAccount(ctx) {
       if (stop) return stop;
       last = { action: 'code' };
     } else if (state === 'password') {
+      const wantsNew = frame.fields.some(x => x.kind === 'password' && (x.isNew || x.confirm));
+      if (last?.action === 'identifier' && !wantsNew && frame.auth?.login && !frame.auth?.signup) {
+        await clearAll(tabId);
+        return accountExists(host, fresh);
+      }
       if (last?.action === 'signup' && last.url === frame.url) {
         await clearAll(tabId);
         if (frame.flags.exists) return accountExists(host, fresh);
@@ -642,8 +678,22 @@ async function createAccount(ctx) {
       }
       const form = pwFields[0].form;
       const inForm = x => !form || !x.form || x.form === form;
+      // Sites that sign in by user name (Taleo) get the email as the user name, so
+      // sign_in can fill the same value later. Fall back to the part before the @.
+      const userFields = frame.fields.filter(x => x.kind === 'username' && inForm(x) && x.empty);
+      let username = saved?.username || email;
+      if (userFields.some(f => (f.maxLength && username.length > f.maxLength) || (f.pattern && !matchesPattern(f.pattern, username)))) {
+        username = email.split('@')[0].replace(/[^A-Za-z0-9._-]/g, '').slice(0, Math.min(64, ...userFields.map(f => f.maxLength || 64)));
+      }
+      if (userFields.length) {
+        await updateVault(v => {
+          v.sites[host] ||= { password: null, source: 'latch', createdAt: now(), status: 'pending' };
+          v.sites[host].username = username;
+        });
+      }
       const fills = [
         ...frame.fields.filter(x => x.kind === 'email' && inForm(x)).map(x => ({ ref: x.ref, value: email })),
+        ...userFields.map(x => ({ ref: x.ref, value: username })),
         ...pwFields.map(x => ({ ref: x.ref, value: password })),
       ];
       const r = await inFrame(tabId, frame.frameId, 'fillAndSubmit', {
@@ -676,7 +726,8 @@ async function createAccount(ctx) {
         return { status: 'sign_up_failed', site: here, message: `The site did not accept the email.${siteSaid(frame.error)}` };
       }
       const field = frame.fields.find(x => x.kind === 'email') || frame.fields.find(x => x.kind === 'username');
-      const r = await inFrame(tabId, frame.frameId, 'fillAndSubmit', { fills: [{ ref: field.ref, value: email }], submitRef: field.ref, purpose: 'signup' });
+      const purpose = frame.auth?.signup ? 'signup' : 'login';
+      const r = await inFrame(tabId, frame.frameId, 'fillAndSubmit', { fills: [{ ref: field.ref, value: email }], submitRef: field.ref, purpose });
       if (!r?.ok) return changedUnderneath(here, 'create_account');
       last = { action: 'identifier', url: frame.url };
     } else {
@@ -686,7 +737,7 @@ async function createAccount(ctx) {
         const link = await confirmByLink(ctx, host);
         if (link.result) {
           await rememberSite(host, { status: 'active', verified: false });
-          return { ...link.result, message: `Account created. ${link.result.message}` };
+          return { ...link.result, account: { creation: 'created', email_verification: 'pending', session: 'unknown' }, message: `Account created. ${link.result.message}` };
         }
       }
       return accountCreated(ctx, host);
@@ -764,6 +815,8 @@ async function resolveTab(tabId) {
 }
 
 async function runTool(tool, args) {
+  const started = now();
+  observation = { snap: [], actions: [], detection_ms: 0, fill_submit_ms: 0, page_wait_ms: 0, verification_ms: 0 };
   let vault;
   let result;
   try {
@@ -786,6 +839,30 @@ async function runTool(tool, args) {
     console.warn('latch:', tool, err?.name || 'error');
     result = { status: 'error', message: 'Latch hit a problem on this page. Try again, or ask the user to sign in themselves.' };
   }
+  const snap = observation.snap;
+  result.paths = Object.assign({}, ...snap.map(f => f.paths));
+  // Merge across frames without letting a later false hide a visible alternative.
+  for (const key of Object.keys(result.paths)) result.paths[key] = snap.some(f => f.paths?.[key]);
+  result.evidence = {
+    actions: [...new Set(observation.actions)],
+    signals: Object.entries({ signedIn: 'account_control', checkEmail: 'email_verification_text', emailCode: 'email_code_text', locked: 'lock_text', exists: 'existing_account_text' })
+      .filter(([flag]) => flagged(snap, flag)).map(([, signal]) => signal),
+    captcha: snap.some(f => f.captcha),
+    error_observed: snap.some(f => !!f.error),
+  };
+  result.account ||= {
+    creation: result.status === 'account_created' ? 'created' : result.status === 'account_exists' ? 'existing' : 'unknown',
+    email_verification: result.verified === true || result.status === 'verified' ? 'verified' :
+      ['check_inbox', 'verification_pending'].includes(result.status) ? 'pending' : 'unknown',
+    session: result.status === 'signed_in' || (result.status === 'account_created' && flagged(snap, 'signedIn')) ? 'signed_in' : 'unknown',
+  };
+  result.next_action ||= ({ signed_in: 'continue', no_account: 'open_signup', account_exists: 'sign_in',
+    account_created: 'inspect_page', check_inbox: 'verify_email', verification_pending: 'verify_email',
+    needs_user: 'inspect_required_step', form_incomplete: 'complete_noncredential_fields',
+    wrong_password: 'stop_retries', sign_in_failed: 'inspect_page', unconfirmed: 'inspect_page', no_form: 'inspect_page' })[result.status];
+  result.timings = { scope: 'tool_call', total_ms: now() - started, detection_ms: observation.detection_ms, fill_submit_ms: observation.fill_submit_ms,
+    page_wait_ms: observation.page_wait_ms, verification_ms: observation.verification_ms };
+  observation = null;
   result = redact(result, vault || emptyVault());
   await recordActivity(tool, result).catch(() => {});
   return result;
@@ -849,6 +926,13 @@ async function popupState() {
 
 const popupHandlers = {
   state: () => popupState(),
+  // The user runs a flow on the tab in front of them, exactly as the AI would.
+  runHere: async ({ tool }) => {
+    if (!['sign_in', 'create_account', 'verify_email'].includes(tool)) return { status: 'error', message: 'Unknown action.' };
+    const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    if (!tab || !/^https?:/.test(tab.url || '')) return { status: 'error', message: 'Open the site\'s page first.' };
+    return enqueue(() => runTool(tool, { tabId: tab.id }));
+  },
   connect: () => { connect(); return {}; },
   provider: ({ email }) => detectProvider(email),
   saveIdentity: async ({ email, password }) => {

@@ -16,7 +16,23 @@ You enter your email and password once, in the Latch extension. When your AI hit
 | `verify_email` | A page says a code or link was sent to the user's email |
 | `fill_email` | A form (a job application, say) needs the user's email address |
 
+The popup's **This tab** section runs the same flows on the page you're looking at: Sign in here, Create account here, Verify email.
+
 Each tool takes an optional `tabId` (the Chrome tab ID from the AI's browser tools) and returns JSON with `status`, `site` and a one-line `message`.
+
+Results also include visible `paths` (email, password, supported social providers, SSO, account creation and guest access), `next_action`, and `evidence` containing attempted actions and observed page signals. These describe available choices; Latch does not click social sign-in automatically. A `lock_text` signal means lock-related wording was observed, not that the account is known to be locked.
+
+Mixed errors such as “incorrect email or password, or account might be locked” return `credentials_or_account_problem`, preserve the redacted site message, and set `retryable: false`. Latch blocks another sign-in attempt to that host for 60 seconds within the running worker. It does not infer account existence or recommend changing the password from an ambiguous error.
+
+The `account` object separates `creation`, `email_verification`, and `session`. Unknown states stay `unknown`; account creation does not imply email verification or an authenticated session. Existing pending credentials remain available for resuming signup.
+
+`timings.scope` is `tool_call`. Milliseconds cover total call time, page detection, combined filling/submission, page waiting, and verification. Filling and submission remain one operation to limit password exposure. Detection overlaps page waiting, and verification can include submission; these counters must not be added together. Navigation before the call, external Gmail or SSO steps, and human intervention are outside this measurement. An orchestrating agent must measure those separately to report a whole journey.
+
+Latch waits through empty redirect pages and forms that are still rendering. A disappearing sign-in form alone is not proof of authentication: `signed_in` requires an authenticated account control. If the page never provides a usable next step or success evidence, the tool returns `unconfirmed`; the AI must inspect the tab before continuing.
+
+Many application sites, including Greenhouse and Lever, accept applications without an account. On those forms, `sign_in` and `create_account` return `no_form` and leave the application untouched. Use `fill_email` to fill the email field separately; it does not submit the application.
+
+After updating the authentication runtime, reload Latch on `chrome://extensions`. The server compares a content fingerprint before filling credentials and returns `reload_required` if Chrome is still running an older copy. Timestamp-only changes and popup edits do not require a reload. It waits for the extension's ready message before sending an operation.
 
 ## Install
 
@@ -33,7 +49,7 @@ npm run setup
 2. Click the Latch icon and enter your email, password and an app password for your inbox.
 3. Add the MCP server to your AI. Run `npm run setup -- --claude-code`, `--claude-desktop` or `--codex`.
 
-The inbox step is optional. Gmail app passwords need 2-Step Verification, many school and work Google accounts block them, and Outlook.com no longer accepts them for mail. Without an inbox connection, when a site emails a code or confirmation link, Latch returns `check_inbox` with your webmail address (for example `https://mail.google.com`). The AI then opens that in a new tab, reads the newest message from the site, and finishes the step itself. In that case the AI sees that email; your password still stays private.
+The inbox step is optional. Gmail app passwords need 2-Step Verification, many school and work Google accounts block them, and Outlook.com no longer accepts them for mail. Without an inbox connection, when a site emails a code or confirmation link, Latch returns `check_inbox` with your webmail address (for example `https://mail.google.com`). The AI uses its connected mail tools when available, otherwise webmail, to read only the newest matching verification message and finish the step itself. The user does not need to retrieve the email. In that case the AI sees that email; your password still stays private.
 
 ## What the AI sees
 

@@ -3,6 +3,7 @@
 import { createServer as createHttp } from 'node:http';
 import { createServer as createTcp } from 'node:net';
 import { randomBytes, randomInt } from 'node:crypto';
+import { atsSites } from './ats-sites.js';
 
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 const code6 = () => String(randomInt(100000, 999999));
@@ -114,7 +115,7 @@ export function startImap({ user, pass, mailbox, stats }) {
           ok(tag, cmd === 'EXAMINE' ? '[READ-ONLY] done' : '[READ-WRITE] done');
           break;
         case 'NOOP': write(`* ${msgs.length} EXISTS\r\n`); ok(tag); break;
-        case 'SEARCH': write(`* SEARCH ${msgs.map((x, i) => (uid ? x.uid : i + 1)).join(' ')}\r\n`); ok(tag); break;
+        case 'SEARCH': stats.searches = (stats.searches || 0) + 1; write(`* SEARCH ${msgs.map((x, i) => (uid ? x.uid : i + 1)).join(' ')}\r\n`); ok(tag); break;
         case 'FETCH': {
           const [, set, items] = /^(\S+) \((.*)\)$/.exec(args) || [, args.split(' ')[0], args];
           const max = uid ? mailbox.nextUid - 1 : msgs.length;
@@ -219,7 +220,7 @@ export async function startSites({ main, mailbox, live = false, port = 0 }) {
     state.posts.push({ site, path: '/login', sentJobsPassword: !!b.password && b.password === state.passwords.get('jobs.localhost') });
     state.secrets.add(b.password || '');
     const acct = account(site, b.email, b.password);
-    if (!acct || acct.password !== b.password) return send(res, loginForm(site, 'Incorrect email or password.'), 401);
+    if (!acct || acct.password !== b.password) return send(res, loginForm(site, site === 'wrong.localhost' ? 'Incorrect password.' : 'Incorrect email or password.'), 401);
     return after(b.email, res);
   };
 
@@ -270,9 +271,13 @@ export async function startSites({ main, mailbox, live = false, port = 0 }) {
       }
       if (url.pathname === '/logout') return redirect(res, '/login', { 'Set-Cookie': 'sid=; Path=/; Max-Age=0' });
       if (url.pathname === '/apply') {
-        return send(res, page('Apply', `<h1>Apply</h1><form><label for="an">Name</label><input id="an" name="name">
+        return send(res, page('Apply', `<header><button>Sign In</button></header><h1>Apply</h1><form method="post" action="/submit-application"><label for="an">Name</label><input id="an" name="name">
           <label for="ae">Email address</label><input id="ae" name="email" type="email"><label for="ap">Phone</label><input id="ap" name="phone" type="tel">
-          <button type="button">Submit application</button></form>`));
+          <button type="submit">Submit application</button></form>`));
+      }
+      if (url.pathname === '/submit-application') {
+        state.posts.push({ site, path: '/submit-application' });
+        return send(res, page('Application submitted', '<h1>Application submitted</h1>'));
       }
     },
 
@@ -487,6 +492,14 @@ export async function startSites({ main, mailbox, live = false, port = 0 }) {
       if (url.pathname === '/login') return req.method === 'GET' ? send(res, loginForm('Sign in to Wrong')) : classicLogin('wrong.localhost', req, res);
     },
 
+    'ambiguous.localhost': async (req, res, url) => {
+      if (url.pathname !== '/login') return;
+      if (req.method === 'GET') return send(res, loginForm('Sign In'));
+      const b = await body(req);
+      state.posts.push({ site: 'ambiguous.localhost', path: '/login' });
+      return send(res, loginForm('Sign In', `The email or password for ${b.email} is incorrect, or your account might be locked.`), 401);
+    },
+
     'captcha.localhost': async (req, res, url) => {
       if (url.pathname === '/login') {
         return send(res, loginForm('Sign in to Captcha', '', `<div class="g-recaptcha"><iframe src="/recaptcha/anchor" title="reCAPTCHA" width="304" height="78"></iframe>
@@ -529,6 +542,8 @@ export async function startSites({ main, mailbox, live = false, port = 0 }) {
       if (url.pathname === '/login') return req.method === 'GET' ? send(res, loginForm('Plain')) : classicLogin('plain.example', req, res);
     },
   };
+
+  Object.assign(sites, atsSites({ state, key, body, page, send, json, redirect, startSession, session, origin, mailbox, token, code6, cookies }));
 
   const server = createHttp(async (req, res) => {
     const host = (req.headers.host || '').split(':')[0];

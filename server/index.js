@@ -4,12 +4,13 @@
 // The first server to start owns the port; later ones relay through it.
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { readdirSync, statSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import WebSocket, { WebSocketServer } from 'ws';
 import { z } from 'zod';
 import { EXTENSION_ID } from '../extension/id.js';
+import { fingerprint } from '../extension/build.js';
 import { checkMailbox, findVerification, lookupProvider } from './mail.js';
 
 const VERSION = '0.1.0';
@@ -23,6 +24,7 @@ const UNAVAILABLE = {
 };
 const TIMED_OUT = { status: 'error', message: 'Latch did not finish in time. Check the tab, then try again.' };
 const DROPPED = { status: 'error', message: 'Latch lost its connection to Chrome. Try again.' };
+const RELOAD_REQUIRED = { status: 'reload_required', message: 'Latch has been updated. Reload the Latch extension on chrome://extensions, then try again.' };
 
 // Everything returned to the AI passes through this shape; unknown keys are dropped.
 const Result = z.object({
@@ -32,23 +34,30 @@ const Result = z.object({
   message: z.string().max(600).optional(),
   inbox: z.string().url().max(200).optional(),
   verified: z.boolean().optional(),
+  retryable: z.boolean().optional(),
+  next_action: z.string().regex(/^[a-z_]{2,60}$/).optional(),
+  paths: z.object(Object.fromEntries(['email', 'password', 'google', 'linkedin', 'microsoft', 'apple', 'facebook', 'sso', 'create_account', 'guest'].map(key => [key, z.boolean().optional()]))).optional(),
+  evidence: z.object({
+    actions: z.array(z.enum(['login_submit', 'signup_submit', 'code_submit', 'verification_submit'])).max(4),
+    signals: z.array(z.enum(['account_control', 'email_verification_text', 'email_code_text', 'lock_text', 'existing_account_text'])).max(5),
+    captcha: z.boolean(), error_observed: z.boolean(),
+  }).optional(),
+  account: z.object({ creation: z.enum(['created', 'existing', 'unknown']), email_verification: z.enum(['pending', 'verified', 'unknown']), session: z.enum(['signed_in', 'unknown']) }).optional(),
+  timings: z.object({ scope: z.literal('tool_call'), total_ms: z.number().nonnegative(), detection_ms: z.number().nonnegative(), fill_submit_ms: z.number().nonnegative(),
+    page_wait_ms: z.number().nonnegative(), verification_ms: z.number().nonnegative() }).optional(),
   missing: z.array(z.string().max(80)).max(12).optional(),
 });
 
-const EXTENSION_DIR = fileURLToPath(new URL('../extension/', import.meta.url));
+const EXTENSION_DIR = process.env.LATCH_EXTENSION_DIR || fileURLToPath(new URL('../extension/', import.meta.url));
 
-// Newest change to the extension's files, so a running copy can tell it is out of date.
-function extensionStamp() {
-  let newest = 0;
-  for (const name of readdirSync(EXTENSION_DIR)) {
-    try { newest = Math.max(newest, statSync(join(EXTENSION_DIR, name)).mtimeMs); } catch {}
-  }
-  return Math.floor(newest);
-}
+// File timestamps can change without a code update (checkout, sync or editor).
+const extensionBuild = () => fingerprint(name => readFile(join(EXTENSION_DIR, name), 'utf8'));
 
 let clientName = 'AI';
 let wss = null;          // set when this process owns the port
 let extension = null;    // extension socket (owner only)
+let extensionReady = false;
+let extensionReadyBuild = '';
 const peers = new Set(); // relay sockets from other Latch servers (owner only)
 let upstream = null;     // socket to the owner (relay only)
 const pending = new Map();
@@ -84,26 +93,35 @@ function onConnection(ws, req) {
   if (req.url === '/peer') {
     peers.add(ws);
     ws.on('message', data => onPeerMessage(ws, data));
-    ws.on('close', () => { peers.delete(ws); send(extension, { type: 'hello', version: VERSION, clients: clients(), stamp: extensionStamp() }); });
+    ws.on('close', () => { peers.delete(ws); send(extension, { type: 'hello', version: VERSION, clients: clients() }); });
     return;
   }
   if (extension && extension !== ws) extension.close();
   extension = ws;
+  extensionReady = false;
+  extensionReadyBuild = '';
   ws.on('message', data => onExtensionMessage(ws, data));
   ws.on('close', () => {
     if (extension !== ws) return;
     extension = null;
+    extensionReady = false;
+    extensionReadyBuild = '';
     failPending(DROPPED);
   });
-  send(ws, { type: 'hello', version: VERSION, clients: clients(), stamp: extensionStamp() });
-  for (const wake of connectWaiters) wake();
-  connectWaiters.clear();
+  send(ws, { type: 'hello', version: VERSION, clients: clients() });
   log('extension connected');
 }
 
 async function onExtensionMessage(ws, data) {
   const msg = parse(data);
   switch (msg.type) {
+    case 'ready':
+      if (ws !== extension) break;
+      extensionReady = true;
+      extensionReadyBuild = typeof msg.build === 'string' ? msg.build : '';
+      for (const wake of connectWaiters) wake();
+      connectWaiters.clear();
+      break;
     case 'ping':
       send(ws, { type: 'pong' });
       break;
@@ -126,7 +144,7 @@ async function onPeerMessage(ws, data) {
   const msg = parse(data);
   if (msg.type === 'hello') {
     ws.clientName = String(msg.client || '').slice(0, 60);
-    send(extension, { type: 'hello', version: VERSION, clients: clients(), stamp: extensionStamp() });
+    send(extension, { type: 'hello', version: VERSION, clients: clients() });
   } else if (msg.type === 'call') {
     const result = await callExtension(msg.tool, msg.args, Math.min(Number(msg.timeoutMs) || 60000, 90000));
     send(ws, { type: 'result', id: msg.id, result });
@@ -134,7 +152,7 @@ async function onPeerMessage(ws, data) {
 }
 
 function waitForExtension(ms) {
-  if (extension) return Promise.resolve();
+  if (extension && extensionReady) return Promise.resolve();
   return new Promise(resolve => {
     const wake = () => { clearTimeout(timer); resolve(); };
     const timer = setTimeout(() => { connectWaiters.delete(wake); resolve(); }, ms);
@@ -145,6 +163,7 @@ function waitForExtension(ms) {
 async function callExtension(tool, args, timeoutMs) {
   await waitForExtension(30000);
   if (!extension) return UNAVAILABLE;
+  if (!extensionReady || extensionReadyBuild !== await extensionBuild()) return RELOAD_REQUIRED;
   const id = ++seq;
   return new Promise(resolve => {
     const timer = setTimeout(() => { pending.delete(id); resolve(TIMED_OUT); }, timeoutMs);
@@ -217,8 +236,9 @@ const server = new McpServer(
       'password or verification codes to you. Browse with your normal Chrome tools and call Latch only ' +
       'when a page needs the user to sign in, create an account, verify their email, or enter their email address. ' +
       'Never ask the user for their password and never type credentials yourself. ' +
-      'If a result has status check_inbox, Latch cannot read the user\'s inbox: follow its message, open the user\'s webmail ' +
-      'in a new tab, read only the newest email from that site, and enter the code or open the link yourself.',
+      'If a result has status check_inbox, use an available connected mail tool to read only the newest matching verification email ' +
+      'from that site; otherwise use the user\'s webmail tab. Enter its code or open its confirmation link yourself, then continue. ' +
+      'This is an automated agent step, not a request for the user to fetch the email.',
   },
 );
 
@@ -266,7 +286,7 @@ server.registerTool('fill_email', {
 server.server.oninitialized = () => {
   const info = server.server.getClientVersion();
   if (info?.name) clientName = String(info.name).slice(0, 60);
-  send(extension, { type: 'hello', version: VERSION, clients: clients(), stamp: extensionStamp() });
+  send(extension, { type: 'hello', version: VERSION, clients: clients() });
   send(upstream, { type: 'hello', client: clientName });
 };
 
