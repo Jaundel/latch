@@ -1,0 +1,38 @@
+{
+  "manifest_version": 3,
+  "name": "Latch",
+  "version": "0.1.0",
+  "description": "Lets your AI sign in and create accounts without seeing your email or password.",
+  "minimum_chrome_version": "116",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArzqY2B0Y3wEPCNvLjXghvK5D+Pxp2Xxs7p3vra7NLtB9ibkwQZprZl7QG4QrDb8gsDkkqQ5iJmhbDuZ8/hTaxeh9PunQQDeIn7pwvPRv9ju8sciZD6/3/rT2Pva/yKWFFu3K8oRKjsBgtls3mvBLU1u1eSEIwF48MCDYuPNtMjznak6Fj39Ciri3FNJ+qxGPuiqvGrSY8vMaM9HFgOT5ERpH0w0au/WS08T1E7+SBahMO4P/5FsMk9ERepiHMNq3Br9Vxv2LnCyAmscTa5uXkJ4MZKIVPLhEtLFK7HqAMpHPyqTlBTHDw23R9Qae5jgP+C6kDYz/VugnrjuOAJ4b3wIDAQAB",
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Latch",
+    "default_icon": {
+      "16": "icons/16.png",
+      "32": "icons/32.png",
+      "48": "icons/48.png"
+    }
+  },
+  "icons": {
+    "16": "icons/16.png",
+    "32": "icons/32.png",
+    "48": "icons/48.png",
+    "128": "icons/128.png"
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "permissions": [
+    "storage",
+    "scripting",
+    "tabs",
+    "alarms",
+    "notifications",
+    "favicon"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ]
+}

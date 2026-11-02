@@ -1,0 +1,19 @@
+node_modules/
+.browsers/
+test/output/
+*.log
+.keytmp.json
+*.pem
+
+# AI assistant files
+.claude/
+CLAUDE.md
+.cursor/
+.cursorrules
+.codex/
+AGENTS.md
+.aider*
+.windsurf*
+.gemini/
+GEMINI.md
+.github/copilot-instructions.md
