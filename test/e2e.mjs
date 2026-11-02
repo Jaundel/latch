@@ -193,6 +193,16 @@ try {
   check('the AI\'s tab never held the link token', !shop.url().includes('token'));
   await noLeak('after link confirmation', shop);
 
+  // 5b. Workday-style sign-up: covered submit button, emailed confirmation link.
+  const workday = await context.newPage();
+  await workday.goto(url('cibc.workday.localhost', '/signup'));
+  await workday.check('#agree');
+  r = await tool('create_account', workday);
+  const wdAcct = sites.accounts.get(`cibc.workday.localhost|${MAIN.email}`);
+  check('Workday-style sign-up behind a click overlay, verified by link', r.status === 'account_created' && r.verified === true && wdAcct?.verified, `${r.status} verified=${r.verified}`);
+  check('Workday-style password meets every listed rule', wdAcct && [/\d/, /[a-z]/, /[A-Z]/, /[^A-Za-z0-9]/].every(re => re.test(wdAcct.password)) && wdAcct.password.length >= 8);
+  await noLeak('after Workday-style sign-up', workday);
+
   // 6. Two-step single-page login with a controlled input, and a 6-box emailed code.
   const steps = await context.newPage();
   await steps.goto(url('steps.localhost', '/login'));

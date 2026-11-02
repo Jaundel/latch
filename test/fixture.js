@@ -433,6 +433,56 @@ export async function startSites({ main, mailbox, live = false, port = 0 }) {
       }
     },
 
+    // Workday-style: the real submit button does nothing; a transparent layer on top handles the click.
+    'cibc.workday.localhost': async (req, res, url) => {
+      const site = 'cibc.workday.localhost';
+      if (url.pathname === '/signup') {
+        return send(res, page('Create Account', `<h1>Create Account</h1>
+          <form id="f"><label for="e">Email Address*</label><input id="e" type="text" autocomplete="email" aria-required="true">
+          <label for="p">Password*</label><input id="p" type="password" autocomplete="new-password" aria-required="true">
+          <label for="v">Verify New Password*</label><input id="v" type="password" autocomplete="new-password" aria-required="true">
+          <label><input id="agree" type="checkbox"> I agree to the above</label>
+          <div style="position:relative;display:inline-block;margin-top:14px">
+            <button type="submit" style="margin:0">Create Account</button>
+            <div role="button" aria-label="Create Account" data-automation-id="click_filter" style="position:absolute;inset:0"></div>
+          </div><div id="err" role="alert"></div></form>
+          <button type="submit" form="none">Sign In</button>
+          <script>
+            document.getElementById('f').addEventListener('submit', e => e.preventDefault());
+            document.querySelector('[data-automation-id=click_filter]').addEventListener('click', async () => {
+              const v = id => document.getElementById(id).value;
+              if (!document.getElementById('agree').checked) return void (document.getElementById('err').textContent = 'You must agree to continue.');
+              if (v('p') !== v('v')) return void (document.getElementById('err').textContent = 'Passwords do not match.');
+              const r = await fetch('/api/signup', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: v('e'), password: v('p') }) }).then(r => r.json());
+              if (r.ok) location.href = '/verify-notice'; else document.getElementById('err').textContent = r.error;
+            });
+          </script>`));
+      }
+      if (url.pathname === '/api/signup') {
+        const b = await body(req);
+        state.posts.push({ site, path: '/api/signup' });
+        if (state.accounts.has(key(site, b.email))) return json(res, { ok: false, error: 'An account with this email already exists.' });
+        const t = token();
+        state.accounts.set(key(site, b.email), { password: b.password, verified: false, token: t });
+        state.passwords.set(site, b.password);
+        state.secrets.add(t);
+        mailbox.add({
+          from: 'CIBC <cibc@myworkday.localhost>', to: b.email, subject: 'Verify your candidate account',
+          html: `<p>Please verify your account.</p><p><a href="${origin(site)}/verify?token=${t}">Verify Account</a></p>`, text: 'Verify your account in the HTML version.',
+        });
+        return json(res, { ok: true });
+      }
+      if (url.pathname === '/verify-notice') {
+        return send(res, page('Verify', '<h1>Verify your account</h1><p>An email has been sent to verify your account. Check your email to continue.</p>'));
+      }
+      if (url.pathname === '/verify') {
+        for (const [k, acct] of state.accounts) {
+          if (k.startsWith(`${site}|`) && acct.token === url.searchParams.get('token')) { acct.verified = true; return send(res, page('Verified', '<h1>Account verified</h1>')); }
+        }
+        return send(res, page('Verify', '<h1>Link expired</h1>'), 400);
+      }
+    },
+
     'wrong.localhost': async (req, res, url) => {
       if (url.pathname === '/login') return req.method === 'GET' ? send(res, loginForm('Sign in to Wrong')) : classicLogin('wrong.localhost', req, res);
     },

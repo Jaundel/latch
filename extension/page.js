@@ -176,6 +176,25 @@
     return null;
   }
 
+  // Press whatever sits on top at the button's centre, as a real click would.
+  // Workday, for one, lays a transparent layer over its buttons and listens there.
+  function press(el) {
+    el.scrollIntoView({ block: 'center', inline: 'center' });
+    const r = el.getBoundingClientRect();
+    const x = r.left + r.width / 2;
+    const y = r.top + r.height / 2;
+    const hit = document.elementFromPoint(x, y);
+    const covered = hit && hit !== el && !el.contains(hit) && !hit.contains(el)
+      && (hit.closest('[role=button]') || el.parentElement?.parentElement?.contains(hit));
+    const target = covered ? hit : el;
+    const init = { bubbles: true, cancelable: true, composed: true, clientX: x, clientY: y, button: 0, pointerType: 'mouse' };
+    target.dispatchEvent(new PointerEvent('pointerdown', init));
+    target.dispatchEvent(new MouseEvent('mousedown', init));
+    target.dispatchEvent(new PointerEvent('pointerup', init));
+    target.dispatchEvent(new MouseEvent('mouseup', init));
+    target.click();
+  }
+
   function submit(anchor, purpose) {
     let fired = false;
     let native = false;
@@ -183,7 +202,7 @@
     addEventListener('submit', onSubmit);
     try {
       const button = findSubmit(anchor, purpose);
-      if (button) button.click();
+      if (button) press(button);
       else if (anchor?.form) anchor.form.requestSubmit();
       else if (anchor) {
         for (const type of ['keydown', 'keypress', 'keyup']) {
