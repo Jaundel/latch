@@ -1,7 +1,7 @@
 // Reads verification emails over IMAP. Only codes and links leave this module,
 // and only back to the extension; nothing here is sent to the AI.
 import { createHash } from 'node:crypto';
-import { resolveMx } from 'node:dns/promises';
+import { Resolver, resolveMx, resolveTxt } from 'node:dns/promises';
 import { ImapFlow } from 'imapflow';
 import { simpleParser } from 'mailparser';
 
@@ -66,13 +66,28 @@ export async function checkMailbox(imap) {
   }
 }
 
+// The system resolver is unreliable on some Windows setups, so fall back to public ones.
+async function dnsQuery(kind, domain) {
+  try {
+    return await (kind === 'mx' ? resolveMx(domain) : resolveTxt(domain));
+  } catch {
+    const resolver = new Resolver({ timeout: 3000, tries: 1 });
+    resolver.setServers(['1.1.1.1', '8.8.8.8']);
+    return kind === 'mx' ? resolver.resolveMx(domain) : resolver.resolveTxt(domain);
+  }
+}
+
 export async function lookupProvider(domain) {
   domain = String(domain || '').toLowerCase();
   try {
-    const mx = (await resolveMx(domain)).map(r => r.exchange.toLowerCase()).join(' ');
+    const mx = (await dnsQuery('mx', domain).catch(() => [])).map(r => r.exchange.toLowerCase()).join(' ');
     if (/google\.com|googlemail\.com/.test(mx)) return { provider: 'google' };
     if (/outlook\.com|protection\.outlook|office365/.test(mx)) return { provider: 'microsoft' };
-    return { provider: 'other' };
+    // Filtering gateways hide the provider in MX; the sender policy usually still names it.
+    const spf = (await dnsQuery('txt', domain).catch(() => [])).map(t => t.join('')).find(t => t.startsWith('v=spf1')) || '';
+    if (/_spf\.google\.com/.test(spf)) return { provider: 'google' };
+    if (/spf\.protection\.outlook\.com/.test(spf)) return { provider: 'microsoft' };
+    return { provider: mx ? 'other' : 'unknown' };
   } catch {
     return { provider: 'unknown' };
   }
