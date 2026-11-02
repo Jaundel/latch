@@ -3,6 +3,7 @@
 // the server carry statuses only, never credentials or codes.
 
 const PORT = 47801;
+const LOADED_AT = Date.now();
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const now = () => Date.now();
 
@@ -151,6 +152,7 @@ async function onBridgeMessage(raw) {
   if (msg.type === 'hello') {
     bridge.clients = (msg.clients || []).map(c => String(c).slice(0, 60)).slice(0, 8);
     notifyPopup();
+    await reloadIfStale(Number(msg.stamp) || 0);
   } else if (msg.type === 'reply') {
     bridge.replies.get(msg.id)?.(msg.result || {});
   } else if (msg.type === 'call') {
@@ -165,6 +167,16 @@ chrome.alarms.onAlarm.addListener(a => { if (a.name === 'connect') connect(); })
 chrome.runtime.onStartup.addListener(connect);
 chrome.runtime.onInstalled.addListener(connect);
 connect();
+
+// The files on disk changed after this copy started: reload once so Chrome runs the new code.
+async function reloadIfStale(stamp) {
+  if (!stamp || stamp <= LOADED_AT || stamp > Date.now()) return;
+  const { reloadedFor } = await chrome.storage.local.get('reloadedFor');
+  if (reloadedFor === stamp) return;
+  await chrome.storage.local.set({ reloadedFor: stamp });
+  await queue;
+  chrome.runtime.reload();
+}
 
 let queue = Promise.resolve();
 function enqueue(fn) {

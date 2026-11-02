@@ -4,6 +4,9 @@
 // The first server to start owns the port; later ones relay through it.
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { readdirSync, statSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import WebSocket, { WebSocketServer } from 'ws';
 import { z } from 'zod';
 import { EXTENSION_ID } from '../extension/id.js';
@@ -30,6 +33,17 @@ const Result = z.object({
   verified: z.boolean().optional(),
   missing: z.array(z.string().max(80)).max(12).optional(),
 });
+
+const EXTENSION_DIR = fileURLToPath(new URL('../extension/', import.meta.url));
+
+// Newest change to the extension's files, so a running copy can tell it is out of date.
+function extensionStamp() {
+  let newest = 0;
+  for (const name of readdirSync(EXTENSION_DIR)) {
+    try { newest = Math.max(newest, statSync(join(EXTENSION_DIR, name)).mtimeMs); } catch {}
+  }
+  return Math.floor(newest);
+}
 
 let clientName = 'AI';
 let wss = null;          // set when this process owns the port
@@ -69,7 +83,7 @@ function onConnection(ws, req) {
   if (req.url === '/peer') {
     peers.add(ws);
     ws.on('message', data => onPeerMessage(ws, data));
-    ws.on('close', () => { peers.delete(ws); send(extension, { type: 'hello', version: VERSION, clients: clients() }); });
+    ws.on('close', () => { peers.delete(ws); send(extension, { type: 'hello', version: VERSION, clients: clients(), stamp: extensionStamp() }); });
     return;
   }
   if (extension && extension !== ws) extension.close();
@@ -80,7 +94,7 @@ function onConnection(ws, req) {
     extension = null;
     failPending(DROPPED);
   });
-  send(ws, { type: 'hello', version: VERSION, clients: clients() });
+  send(ws, { type: 'hello', version: VERSION, clients: clients(), stamp: extensionStamp() });
   for (const wake of connectWaiters) wake();
   connectWaiters.clear();
   log('extension connected');
@@ -111,7 +125,7 @@ async function onPeerMessage(ws, data) {
   const msg = parse(data);
   if (msg.type === 'hello') {
     ws.clientName = String(msg.client || '').slice(0, 60);
-    send(extension, { type: 'hello', version: VERSION, clients: clients() });
+    send(extension, { type: 'hello', version: VERSION, clients: clients(), stamp: extensionStamp() });
   } else if (msg.type === 'call') {
     const result = await callExtension(msg.tool, msg.args, Math.min(Number(msg.timeoutMs) || 60000, 90000));
     send(ws, { type: 'result', id: msg.id, result });
@@ -248,7 +262,7 @@ server.registerTool('fill_email', {
 server.server.oninitialized = () => {
   const info = server.server.getClientVersion();
   if (info?.name) clientName = String(info.name).slice(0, 60);
-  send(extension, { type: 'hello', version: VERSION, clients: clients() });
+  send(extension, { type: 'hello', version: VERSION, clients: clients(), stamp: extensionStamp() });
   send(upstream, { type: 'hello', client: clientName });
 };
 
