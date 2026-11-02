@@ -12,8 +12,6 @@
   --ok: #18794e;
   --ok-dot: #2fa36b;
   --warn: #9a5b00;
-  --warn-bg: #fff7e8;
-  --warn-line: #f2d39c;
   --danger: #c0352b;
   --focus: #3b6ef5;
   --radius: 10px;
@@ -35,8 +33,6 @@
     --ok: #5fd39a;
     --ok-dot: #3ec27f;
     --warn: #f1b45a;
-    --warn-bg: #2a2214;
-    --warn-line: #4d3b1a;
     --danger: #f27b72;
     --focus: #7b9cff;
     color-scheme: dark;
@@ -274,18 +270,6 @@ details.adv[open] summary::before { content: "\2212  "; }
   color: var(--fg-2);
   font-size: 12px;
 }
-
-.approval {
-  margin-top: 12px;
-  padding: 12px;
-  border: 1px solid var(--warn-line);
-  border-radius: var(--radius);
-  background: var(--warn-bg);
-}
-.approval b { display: block; font-weight: 600; }
-.approval p { margin: 2px 0 10px; color: var(--fg-2); font-size: 12px; }
-.approval .actions { margin: 0; gap: 8px; }
-.approval .actions .btn.primary { flex: 0 0 auto; }
 
 .section-head {
   display: flex;

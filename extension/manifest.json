@@ -29,7 +29,6 @@
     "scripting",
     "tabs",
     "alarms",
-    "notifications",
     "favicon"
   ],
   "host_permissions": [

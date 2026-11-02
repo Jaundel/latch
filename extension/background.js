@@ -89,14 +89,12 @@ function updateVault(fn) {
   return run;
 }
 
-const DEFAULT_SETTINGS = { paused: false, askNewSites: false, newPasswords: 'unique' };
+const DEFAULT_SETTINGS = { paused: false, newPasswords: 'unique' };
 
 async function getMeta() {
-  const m = await chrome.storage.local.get(['settings', 'allowed', 'pending', 'activity', 'usedMail']);
+  const m = await chrome.storage.local.get(['settings', 'activity', 'usedMail']);
   return {
     settings: { ...DEFAULT_SETTINGS, ...m.settings },
-    allowed: m.allowed || [],
-    pending: m.pending || [],
     activity: m.activity || [],
     usedMail: m.usedMail || [],
   };
@@ -274,7 +272,7 @@ function pickFrame(snap) {
 const flagged = (snap, name) => snap.some(f => f.flags?.[name]);
 const hostOf = url => { try { return new URL(url).hostname; } catch { return ''; } };
 
-// ---------- credentials and approvals
+// ---------- credentials
 
 const SETS = ['abcdefghijkmnopqrstuvwxyz', 'ABCDEFGHJKLMNPQRSTUVWXYZ', '23456789', '!@#$%*-_+=?'];
 
@@ -326,69 +324,10 @@ function siteFor(vault, host) {
   return same.length === 1 ? { host: same[0][0], ...same[0][1] } : null;
 }
 
-const approvalWaiters = new Map();
-
-async function updateBadge() {
-  const { pending = [] } = await chrome.storage.local.get('pending');
-  await chrome.action.setBadgeBackgroundColor({ color: '#B45309' });
-  await chrome.action.setBadgeText({ text: pending.length ? String(pending.length) : '' });
-}
-
-async function requestApproval(host, ms = 40000) {
-  const { pending = [] } = await chrome.storage.local.get('pending');
-  if (!pending.includes(host)) await chrome.storage.local.set({ pending: [...pending, host] });
-  await updateBadge();
-  notifyPopup();
-  chrome.notifications.create(`approve|${host}`, {
-    type: 'basic',
-    iconUrl: 'icons/128.png',
-    title: `Use your password on ${host}?`,
-    message: 'Your AI is signing in to this site. Latch will fill your password; the AI will not see it.',
-    buttons: [{ title: 'Allow' }, { title: 'Not now' }],
-    requireInteraction: true,
-    priority: 2,
-  }, () => void chrome.runtime.lastError);
-  return new Promise(resolve => {
-    const waiters = approvalWaiters.get(host) || new Set();
-    approvalWaiters.set(host, waiters);
-    const done = allow => { clearTimeout(timer); waiters.delete(done); resolve(allow); };
-    const timer = setTimeout(() => done(false), ms);
-    waiters.add(done);
-  });
-}
-
-async function decide(host, allow) {
-  const { pending = [], allowed = [] } = await chrome.storage.local.get(['pending', 'allowed']);
-  await chrome.storage.local.set({
-    pending: pending.filter(h => h !== host),
-    allowed: allow ? [...new Set([...allowed, host])] : allowed,
-  });
-  for (const done of approvalWaiters.get(host) || []) done(allow);
-  approvalWaiters.delete(host);
-  chrome.notifications.clear(`approve|${host}`, () => void chrome.runtime.lastError);
-  await updateBadge();
-  notifyPopup();
-}
-
-chrome.notifications.onButtonClicked.addListener((id, index) => {
-  if (id.startsWith('approve|')) decide(id.slice(8), index === 0);
-});
-chrome.notifications.onClicked.addListener(() => chrome.action.openPopup?.().catch(() => {}));
-
-async function credentialFor(ctx, host, verb) {
+async function credentialFor(ctx, host) {
   const site = siteFor(ctx.vault, host);
   const main = ctx.vault.identity;
   if (site?.password) return { username: site.username || main.email, password: site.password, host: site.host };
-  const { allowed } = await getMeta();
-  if (ctx.meta.settings.askNewSites && !allowed.includes(host)) {
-    if (!(await requestApproval(host, ctx.meta.settings.approvalWaitMs || 40000))) {
-      return {
-        blocked: needsUser('site_approval', host,
-          `Latch needs the user's OK before using their password on ${host}. A request is waiting in the Latch extension; ` +
-          `ask the user to allow it, then call ${verb} again.`),
-      };
-    }
-  }
   return { username: main.email, password: main.password, host };
 }
 
@@ -548,8 +487,7 @@ async function signIn(ctx) {
       last = { action: 'code', host };
     } else if (state === 'password') {
       if (last?.action === 'password' && last.host === host) return loginFailed(ctx, frame);
-      const cred = await credentialFor(ctx, host, 'sign_in');
-      if (cred.blocked) return cred.blocked;
+      const cred = await credentialFor(ctx, host);
       const pw = frame.fields.find(x => x.kind === 'password' && !x.confirm) || frame.fields.find(x => x.kind === 'password');
       const ident = frame.fields.filter(x => (x.kind === 'email' || x.kind === 'username') && (!pw.form || x.form === pw.form));
       const fills = [...ident.map(x => ({ ref: x.ref, value: cred.username })), { ref: pw.ref, value: cred.password }];
@@ -644,9 +582,7 @@ async function createAccount(ctx) {
   let fresh = false;
   if (!password) {
     if (ctx.meta.settings.newPasswords === 'mine' || saved) {
-      const cred = await credentialFor(ctx, host, 'create_account');
-      if (cred.blocked) return cred.blocked;
-      password = cred.password;
+      password = (await credentialFor(ctx, host)).password;
     } else {
       password = generatePassword(frame.fields.filter(x => x.kind === 'password'));
       fresh = true;
@@ -867,8 +803,6 @@ async function popupState() {
     email: vault.identity?.email || '',
     mailbox: vault.mailbox ? { user: vault.mailbox.user, host: vault.mailbox.host, port: vault.mailbox.port, secure: vault.mailbox.secure } : null,
     settings: meta.settings,
-    allowed: meta.allowed,
-    pending: meta.pending,
     activity: meta.activity.slice(0, 20),
     sites: Object.entries(vault.sites)
       .map(([host, s]) => ({ host, source: s.source, createdAt: s.createdAt, lastUsed: s.lastUsed, status: s.status, verified: !!s.verified, hasPassword: !!s.password }))
@@ -908,19 +842,12 @@ const popupHandlers = {
     await chrome.storage.local.set({ settings: { ...settings, ...patch } });
     return { ok: true };
   },
-  decide: async ({ host, allow }) => { await decide(host, allow); return { ok: true }; },
-  revoke: async ({ host }) => {
-    const { allowed } = await getMeta();
-    await chrome.storage.local.set({ allowed: allowed.filter(h => h !== host) });
-    return { ok: true };
-  },
   reveal: async ({ host }) => ({ password: (await readVault()).sites[host]?.password || '' }),
   forget: async ({ host }) => { await updateVault(v => { delete v.sites[host]; }); return { ok: true }; },
   erase: async () => {
     await chrome.storage.local.clear();
     await keyStore('readwrite', s => s.clear());
     keyPromise = null;
-    await updateBadge();
     return { ok: true };
   },
 };
@@ -937,4 +864,3 @@ function notifyPopup() {
   chrome.runtime.sendMessage({ type: 'changed' }).catch(() => {});
 }
 
-updateBadge().catch(() => {});

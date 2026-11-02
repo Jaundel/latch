@@ -77,7 +77,6 @@ await popup.screenshot({ path: join(out, 'popup-setup.png') });
 // ---------- setup through the popup, as the user would
 await popup.fill('#email', MAIN.email);
 await popup.fill('#password', MAIN.password);
-await popup.check('form .check input');
 await popup.click('button[type=submit]');
 await popup.waitForSelector('#app-password');
 await popup.fill('#app-password', APP_PASSWORD);
@@ -145,20 +144,6 @@ async function watch(page, fn) {
   return { result, samples, hits };
 }
 
-async function approve(host, allow = true, ms = 30000) {
-  const end = Date.now() + ms;
-  while (Date.now() < end) {
-    const card = popup.locator('.approval', { hasText: host });
-    if (await card.count()) {
-      if (host === 'steps.localhost') await popup.screenshot({ path: join(out, 'popup-approval.png') });
-      await card.getByRole('button', { name: allow ? 'Allow' : 'Not now' }).click();
-      return true;
-    }
-    await sleep(150);
-  }
-  return false;
-}
-
 const posts = (site, path) => sites.posts.filter(p => p.site === site && (!path || p.path === path)).length;
 
 try {
@@ -208,12 +193,10 @@ try {
   check('the AI\'s tab never held the link token', !shop.url().includes('token'));
   await noLeak('after link confirmation', shop);
 
-  // 6. Two-step single-page login with a controlled input, approval in Latch, and a 6-box emailed code.
+  // 6. Two-step single-page login with a controlled input, and a 6-box emailed code.
   const steps = await context.newPage();
   await steps.goto(url('steps.localhost', '/login'));
-  const approved = approve('steps.localhost');
   const spa = await watch(steps, () => tool('sign_in', steps));
-  check('first use of the main password waits for the user\'s approval', await approved);
   check('two-step SPA sign-in with emailed digit code', spa.result.status === 'signed_in' && steps.url().endsWith('/home'), spa.result.status);
   note('single-page form: samples where page scripts could read the password mid-request', `${spa.hits} of ${spa.samples}`);
   await noLeak('after SPA sign-in', steps);
@@ -221,9 +204,7 @@ try {
   // 7. Wrong password: reported, and the fields are cleared before the AI looks again.
   const wrong = await context.newPage();
   await wrong.goto(url('wrong.localhost', '/login'));
-  const wrongApproved = approve('wrong.localhost');
   r = await tool('sign_in', wrong);
-  await wrongApproved;
   check('wrong password is reported', r.status === 'wrong_password', r.status);
   await noLeak('after wrong password', wrong);
 
@@ -238,9 +219,7 @@ try {
   // 9. Phone code: hand off.
   const phone = await context.newPage();
   await phone.goto(url('phone.localhost', '/login'));
-  const phoneApproved = approve('phone.localhost');
   r = await tool('sign_in', phone);
-  await phoneApproved;
   check('phone verification hands off to the user', r.status === 'needs_user' && r.reason === 'phone_code', `${r.status}/${r.reason}`);
 
   // 10. Plain http on a public-looking host: refused.
@@ -252,21 +231,14 @@ try {
   // 11. Login form inside a cross-origin iframe.
   const framed = await context.newPage();
   await framed.goto(url('frame.localhost', '/'));
-  const frameApproved = approve('auth.frame.localhost');
   r = await tool('sign_in', framed);
-  await frameApproved;
   check('sign-in inside an embedded login frame', r.status === 'signed_in' && posts('auth.frame.localhost') === 1, `${r.status} at ${r.site}`);
 
-  // 12. Lookalike host: the jobs password is not offered, and the main password waits for approval.
-  await popup.evaluate(async () => {
-    const { settings = {} } = await chrome.storage.local.get('settings');
-    await chrome.storage.local.set({ settings: { ...settings, approvalWaitMs: 2500 } });
-  });
+  // 12. Lookalike host: the password saved for jobs.localhost must not go to jobs.evil.localhost.
   const evil = await context.newPage();
   await evil.goto(url('jobs.evil.localhost', '/login'));
   r = await tool('sign_in', evil);
-  check('lookalike site gets nothing without approval', r.status === 'needs_user' && r.reason === 'site_approval' && posts('jobs.evil.localhost') === 0, `${r.status}/${r.reason}`);
-  check('the pending request shows in Latch', await approve('jobs.evil.localhost', false, 5000));
+  check("a lookalike site never receives another site's saved password", !sites.posts.some(p => p.site === 'jobs.evil.localhost' && p.sentJobsPassword), r.status);
   await noLeak('after lookalike', evil);
 
   // 13. Account first, email verification later through verify_email.
@@ -294,7 +266,6 @@ try {
   check('pausing Latch stops all fills', r.status === 'paused', r.status);
   await popup.locator('.foot .switch').click();
 
-  await popup.evaluate(() => chrome.storage.local.get('settings').then(({ settings }) => chrome.storage.local.set({ settings: { ...settings, approvalWaitMs: undefined } })));
   await popup.reload();
   await popup.waitForSelector('.identity');
   await popup.screenshot({ path: join(out, 'popup-home.png') });

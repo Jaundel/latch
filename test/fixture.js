@@ -216,7 +216,7 @@ export async function startSites({ main, mailbox, live = false, port = 0 }) {
 
   const classicLogin = async (site, req, res, after = (email, r) => redirect(r, '/dashboard', { 'Set-Cookie': startSession(site, email) })) => {
     const b = await body(req);
-    state.posts.push({ site, path: '/login' });
+    state.posts.push({ site, path: '/login', sentJobsPassword: !!b.password && b.password === state.passwords.get('jobs.localhost') });
     state.secrets.add(b.password || '');
     const acct = account(site, b.email, b.password);
     if (!acct || acct.password !== b.password) return send(res, loginForm(site, 'Incorrect email or password.'), 401);

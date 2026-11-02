@@ -61,7 +61,6 @@ function identityScreen() {
   const editing = state.setup;
   const email = h('input', { id: 'email', type: 'email', placeholder: 'you@example.com', autocomplete: 'off', value: state.email || '' });
   const pw = passwordInput('password', { placeholder: editing ? 'Leave blank to keep current' : 'Your password' });
-  const ask = h('input', { type: 'checkbox', checked: state.settings.askNewSites });
   const go = h('button', { class: 'btn primary block', type: 'submit', disabled: true }, editing ? 'Save' : 'Continue');
   const valid = () => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.value.trim()) && (editing || pw.querySelector('input').value.length > 0);
   const update = () => { go.disabled = !valid(); };
@@ -72,7 +71,6 @@ function identityScreen() {
       if (!valid()) return;
       go.disabled = true;
       await call('saveIdentity', { email: email.value.trim(), password: pw.querySelector('input').value });
-      await call('settings', { patch: { askNewSites: ask.checked } });
       await refresh();
       show(editing ? 'home' : 'inbox');
     },
@@ -83,9 +81,6 @@ function identityScreen() {
     h('p', { class: 'lede' }, 'Your AI uses these to sign in and create accounts for you. They stay on this computer, and the AI never sees them.'),
     h('label', { class: 'field' }, h('span', {}, 'Email'), email),
     h('label', { class: 'field' }, h('span', {}, 'Password'), pw),
-    h('label', { class: 'check' }, ask, h('span', {},
-      h('b', {}, 'Ask me before using this password on a new site'),
-      h('small', {}, 'New accounts Latch creates get their own strong password.'))),
     go,
   );
   view.replaceChildren(form);
@@ -218,15 +213,6 @@ function homeScreen() {
     parts.push(h('div', { class: 'banner' }, 'Waiting for your AI. Latch connects when Claude or Codex starts with the Latch tool added.'));
   }
 
-  for (const host of s.pending) {
-    parts.push(h('div', { class: 'approval' },
-      h('b', {}, `Use your password on ${host}?`),
-      h('p', {}, 'Your AI is trying to sign in there. It won’t see the password.'),
-      h('div', { class: 'actions' },
-        h('button', { class: 'btn primary small', type: 'button', onclick: () => call('decide', { host, allow: true }).then(refreshAndRender) }, 'Allow'),
-        h('button', { class: 'btn small', type: 'button', onclick: () => call('decide', { host, allow: false }).then(refreshAndRender) }, 'Not now'))));
-  }
-
   parts.push(h('div', { class: 'section-head' }, h('h2', {}, 'Sites'), s.sites.length ? h('span', {}, String(s.sites.length)) : null));
   parts.push(s.sites.length
     ? h('ul', { class: 'list' }, s.sites.map(siteRow))
@@ -256,11 +242,6 @@ function settingsScreen() {
     onclick: async () => { await call('settings', { patch: { newPasswords: value } }); await refreshAndRender(); },
   }, value === 'unique' ? 'Unique' : 'Same as mine');
 
-  const ask = h('input', {
-    type: 'checkbox', checked: s.settings.askNewSites,
-    onchange: async e => { await call('settings', { patch: { askNewSites: e.target.checked } }); await refreshAndRender(); },
-  });
-
   const erase = h('div', {});
   erase.append(h('button', {
     class: 'link danger', type: 'button',
@@ -280,14 +261,6 @@ function settingsScreen() {
       h('small', {}, s.settings.newPasswords === 'unique'
         ? 'Each new account gets its own strong password. You can view them on the main screen.'
         : 'New accounts use the password you saved in Latch.')),
-    h('div', { class: 'setting' },
-      h('div', {}, h('b', {}, 'Ask before using my password on a new site'), h('small', {}, 'Protects your password if a page tricks your AI.')),
-      h('label', { class: 'switch' }, ask, h('span', { class: 'track' }))),
-    s.allowed.length ? h('div', { class: 'block-setting' },
-      h('b', {}, 'Sites allowed to use your password'),
-      h('ul', { class: 'list', style: 'margin-top:6px' }, s.allowed.map(host => h('li', { class: 'row' },
-        favicon(host), h('div', { class: 'name' }, host),
-        h('button', { class: 'row-action', type: 'button', onclick: () => call('revoke', { host }).then(refreshAndRender) }, 'Remove'))))) : null,
     h('div', { class: 'setting' },
       h('div', { style: 'min-width:0' }, h('b', {}, 'Inbox'),
         h('small', {}, s.mailbox ? `${s.mailbox.user} · ${s.mailbox.host}` : 'Not connected')),

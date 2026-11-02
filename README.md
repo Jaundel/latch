@@ -39,10 +39,10 @@ Gmail app passwords need 2-Step Verification. Some school and work Google accoun
 
 - Tool results never include the email, passwords, codes or links. Every result goes through a fixed schema and a redaction pass before it leaves the extension or the server.
 - While Latch fills a form, the AI is blocked waiting on the tool call. On normal forms the password goes in and the form is submitted in one script task, and the fields are emptied as soon as the browser has captured them. On single-page forms the password stays in the field until the site answers (about 0.4 s in the test), and Latch empties the fields before it returns.
-- Saved passwords only go to the site they were saved for. By default your main password is used on any site the AI signs in to. Turn on "Ask before using my password on a new site" in Settings to approve each new site once; that protects your password if a page tricks your AI into a fake login.
+- Passwords Latch generates only go to the site they were made for. Your main password is used on any site the AI signs in to, with no prompts, so a page that tricks your AI into a fake login would receive it. Letting Latch generate passwords for new accounts keeps that exposure to the sites where you reuse your main password.
 - Latch fills credentials only on https pages, and on http when the page is local.
 
-Latch can't hide what a site shows you after you sign in, like a profile menu with your email in it. `fill_email` also leaves the address in the field, where the AI could read it back. Anything running as you on this computer can read Chrome's extension storage. That includes an AI with a shell or full desktop control, which could also click the approval. Latch keeps your details from an AI whose only reach is the browser.
+Latch can't hide what a site shows you after you sign in, like a profile menu with your email in it. `fill_email` also leaves the address in the field, where the AI could read it back. Anything running as you on this computer can read Chrome's extension storage. That includes an AI with a shell or full desktop control. Latch keeps your details from an AI whose only reach is the browser.
 
 ## What it hands back to you
 
