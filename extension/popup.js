@@ -139,7 +139,7 @@ async function inboxScreen() {
   },
     editing ? backButton('settings') : h('p', { class: 'step' }, 'Step 2 of 2'),
     h('h1', {}, 'Connect your inbox'),
-    h('p', { class: 'lede' }, 'So Latch can enter verification codes. It only opens recent messages from the site being signed in to.'),
+    h('p', { class: 'lede' }, 'Optional. With it, Latch enters emailed verification codes for you, opening only recent messages from the site being signed in to. Without it, your AI asks you for the code.'),
     card,
     h('label', { class: 'field' }, h('span', {}, 'App password'), pass),
     h('details', { class: 'adv' }, h('summary', {}, 'Server settings'),
@@ -211,7 +211,7 @@ function homeScreen() {
 
   if (!s.mailbox) {
     parts.push(h('div', { class: 'banner' },
-      'Connect your inbox so Latch can handle verification codes. ',
+      'Optional: connect your inbox and Latch will enter emailed codes for you. ',
       h('button', { class: 'link', type: 'button', onclick: () => show('inbox') }, 'Connect')));
   }
   if (!s.connected) {
