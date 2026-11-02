@@ -29,7 +29,8 @@ const Result = z.object({
   status: z.string().regex(/^[a-z_]{2,40}$/),
   site: z.string().max(253).regex(/^[a-z0-9.-]*$/i).optional(),
   reason: z.string().regex(/^[a-z_]{2,40}$/).optional(),
-  message: z.string().max(400).optional(),
+  message: z.string().max(600).optional(),
+  inbox: z.string().url().max(200).optional(),
   verified: z.boolean().optional(),
   missing: z.array(z.string().max(80)).max(12).optional(),
 });
@@ -215,7 +216,9 @@ const server = new McpServer(
       'Latch signs the user in and creates accounts in their Chrome tabs without revealing their email, ' +
       'password or verification codes to you. Browse with your normal Chrome tools and call Latch only ' +
       'when a page needs the user to sign in, create an account, verify their email, or enter their email address. ' +
-      'Never ask the user for their password and never type credentials yourself.',
+      'Never ask the user for their password and never type credentials yourself. ' +
+      'If a result has status check_inbox, Latch cannot read the user\'s inbox: follow its message, open the user\'s webmail ' +
+      'in a new tab, read only the newest email from that site, and enter the code or open the link yourself.',
   },
 );
 
@@ -247,7 +250,8 @@ server.registerTool('verify_email', {
   description:
     'Finish an email verification step, for example when a page says a code or link was sent to the user\'s email. ' +
     'Latch reads only the matching recent message from that site, then enters the code in the tab or opens the link privately. ' +
-    'Codes and links are never shown to you.',
+    'Codes and links are not shown to you, unless the user has not connected their inbox; then the result is check_inbox ' +
+    'and tells you how to fetch the email yourself.',
   inputSchema: tabArg,
 }, args => call('verify_email', args, 55000));
 

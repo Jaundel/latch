@@ -33,11 +33,11 @@ npm run setup
 2. Click the Latch icon and enter your email, password and an app password for your inbox.
 3. Add the MCP server to your AI. Run `npm run setup -- --claude-code`, `--claude-desktop` or `--codex`.
 
-Gmail app passwords need 2-Step Verification. Some school and work Google accounts block them. Outlook.com no longer accepts app passwords for mail, so skip the inbox step there; Latch will report when a code needs you.
+The inbox step is optional. Gmail app passwords need 2-Step Verification, many school and work Google accounts block them, and Outlook.com no longer accepts them for mail. Without an inbox connection, when a site emails a code or confirmation link, Latch returns `check_inbox` with your webmail address (for example `https://mail.google.com`). The AI then opens that in a new tab, reads the newest message from the site, and finishes the step itself. In that case the AI sees that email; your password still stays private.
 
 ## What the AI sees
 
-- Tool results never include the email, passwords, codes or links. Every result goes through a fixed schema and a redaction pass before it leaves the extension or the server.
+- Tool results never include the email, passwords, codes or links. The one exception is the `check_inbox` fallback above, where the AI reads the code from your webmail itself. Every result goes through a fixed schema and a redaction pass before it leaves the extension or the server.
 - While Latch fills a form, the AI is blocked waiting on the tool call. On normal forms the password goes in and the form is submitted in one script task, and the fields are emptied as soon as the browser has captured them. On single-page forms the password stays in the field until the site answers (about 0.4 s in the test), and Latch empties the fields before it returns.
 - Passwords Latch generates only go to the site they were made for. Your main password is used on any site the AI signs in to, with no prompts, so a page that tricks your AI into a fake login would receive it. Letting Latch generate passwords for new accounts keeps that exposure to the sites where you reuse your main password.
 - Latch fills credentials only on https pages, and on http when the page is local.
@@ -54,4 +54,4 @@ CAPTCHAs, codes sent to your phone, authenticator apps, passkeys, push approvals
 npm test
 ```
 
-The test starts local practice sites and a fake IMAP inbox, loads the extension in Chromium, and calls the tools through a real MCP client. It covers sign-up with code and link verification, sign-in, two-step single-page logins, retries, wrong passwords, CAPTCHA and phone hand-offs, iframes, lookalike sites, insecure pages and pausing. It then checks the tool results, the page, the server log and the saved data for anything private. Set `HEADED=1` to watch it run.
+The test starts local practice sites and a fake IMAP inbox, loads the extension in Chromium, and calls the tools through a real MCP client. It covers sign-up with code and link verification, sign-in, two-step single-page logins, retries, wrong passwords, CAPTCHA and phone hand-offs, the webmail fallback, iframes, lookalike sites, insecure pages and pausing. It then checks the tool results, the page, the server log and the saved data for anything private. Set `HEADED=1` to watch it run.

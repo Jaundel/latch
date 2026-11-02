@@ -379,15 +379,28 @@ async function markUsed(key) {
   await chrome.storage.local.set({ usedMail: [key, ...usedMail].slice(0, 100) });
 }
 
-function mailProblem(ctx, mail, host) {
-  if (!ctx.vault.mailbox) {
-    return needsUser('mailbox', host, 'The site sent something to the user\'s email, but Latch is not connected to their inbox. Ask the user to connect it in Latch or finish this step themselves.');
-  }
-  if (mail.error === 'auth') {
-    return needsUser('mailbox', host, 'Latch could not sign in to the user\'s inbox. Ask the user to reconnect it in Latch.');
-  }
+async function mailProblem(ctx, mail, host, kind) {
+  if (!ctx.vault.mailbox || mail.error === 'auth') return inboxFallback(ctx, host, kind);
   if (mail.error) return { status: 'error', site: host, message: 'Latch could not reach the user\'s inbox. Try verify_email again shortly.' };
   return { status: 'verification_pending', site: host, message: 'The verification email has not arrived yet. Wait a little, then call verify_email.' };
+}
+
+// Without an inbox connection the AI can still fetch the email itself in the
+// user's webmail. It will see that message; the password stays private.
+async function inboxFallback(ctx, host, kind) {
+  const inbox = await webmailFor(ctx.vault.identity.email);
+  const where = inbox ? `open ${inbox} in a new tab (the user is already signed in there)` : 'open the user\'s webmail in a new tab';
+  const step = kind === 'link'
+    ? 'open the confirmation link in it'
+    : `read the code and type it into the code field in tab ${ctx.tabId}, then submit`;
+  return {
+    status: 'check_inbox',
+    reason: kind === 'link' ? 'email_link' : 'email_code',
+    site: host,
+    ...(inbox ? { inbox } : {}),
+    message: `${host} emailed the user ${kind === 'link' ? 'a confirmation link' : 'a verification code'}, and Latch is not connected to their inbox, ` +
+      `so get it yourself: ${where}, open only the newest message from ${host}, ${step}. Then carry on in tab ${ctx.tabId}.`,
+  };
 }
 
 async function openPrivately(ctx, url) {
@@ -408,9 +421,9 @@ async function enterCode(ctx, frame) {
   if (f.appCode && !f.emailCode) {
     return needsUser('authenticator_code', host, 'The site wants a code from an authenticator app. Ask the user to enter it in the tab, then continue.');
   }
-  if (!ctx.vault.mailbox) return mailProblem(ctx, {}, host);
+  if (!ctx.vault.mailbox) return mailProblem(ctx, {}, host, 'code');
   const mail = await fetchMail(ctx, host, 'code');
-  if (!mail.found) return mailProblem(ctx, mail, host);
+  if (!mail.found) return mailProblem(ctx, mail, host, 'code');
   if (mail.code) {
     const refs = frame.digits.length >= 4 ? frame.digits : [frame.fields.find(x => x.kind === 'code').ref];
     await inFrame(ctx.tabId, frame.frameId, 'fillCode', { refs, code: mail.code });
@@ -423,9 +436,9 @@ async function enterCode(ctx, frame) {
 }
 
 async function confirmByLink(ctx, host) {
-  if (!ctx.vault.mailbox) return { result: mailProblem(ctx, {}, host) };
+  if (!ctx.vault.mailbox) return { result: await mailProblem(ctx, {}, host, 'link') };
   const mail = await fetchMail(ctx, host, 'link');
-  if (!mail.found || !mail.link) return { result: mailProblem(ctx, mail, host) };
+  if (!mail.found || !mail.link) return { result: await mailProblem(ctx, mail, host, 'link') };
   await openPrivately(ctx, mail.link);
   await markUsed(mail.key);
   ctx.verified = true;
@@ -781,15 +794,15 @@ async function runTool(tool, args) {
 // ---------- popup API (accepted only from this extension's own pages)
 
 const PROVIDERS = {
-  gmail: { name: 'Gmail', host: 'imap.gmail.com', help: 'https://myaccount.google.com/apppasswords', note: 'Needs 2-Step Verification on your Google account.' },
-  workspace: { name: 'Google Workspace', host: 'imap.gmail.com', help: 'https://myaccount.google.com/apppasswords', note: 'Many schools turn app passwords off. If yours has, skip this step.' },
-  outlook: { name: 'Outlook', host: 'outlook.office365.com', unsupported: 'Microsoft no longer accepts app passwords for mail. Skip this for now; your AI will ask you when a site sends a code.' },
-  yahoo: { name: 'Yahoo Mail', host: 'imap.mail.yahoo.com', help: 'https://login.yahoo.com/myaccount/security/app-password' },
-  icloud: { name: 'iCloud Mail', host: 'imap.mail.me.com', help: 'https://account.apple.com/account/manage', note: 'Use an app-specific password.' },
-  aol: { name: 'AOL Mail', host: 'imap.aol.com', help: 'https://login.aol.com/account/security' },
-  fastmail: { name: 'Fastmail', host: 'imap.fastmail.com', help: 'https://app.fastmail.com/settings/security/apppasswords' },
-  zoho: { name: 'Zoho Mail', host: 'imap.zoho.com' },
-  gmx: { name: 'GMX', host: 'imap.gmx.com' },
+  gmail: { webmail: 'https://mail.google.com', name: 'Gmail', host: 'imap.gmail.com', help: 'https://myaccount.google.com/apppasswords', note: 'Needs 2-Step Verification on your Google account.' },
+  workspace: { webmail: 'https://mail.google.com', name: 'Google Workspace', host: 'imap.gmail.com', help: 'https://myaccount.google.com/apppasswords', note: 'Many schools turn app passwords off. If yours has, skip this step.' },
+  outlook: { webmail: 'https://outlook.live.com/mail', name: 'Outlook', host: 'outlook.office365.com', unsupported: 'Microsoft no longer accepts app passwords for mail. Skip this; your AI will read codes in your inbox tab instead.' },
+  yahoo: { webmail: 'https://mail.yahoo.com', name: 'Yahoo Mail', host: 'imap.mail.yahoo.com', help: 'https://login.yahoo.com/myaccount/security/app-password' },
+  icloud: { webmail: 'https://www.icloud.com/mail', name: 'iCloud Mail', host: 'imap.mail.me.com', help: 'https://account.apple.com/account/manage', note: 'Use an app-specific password.' },
+  aol: { webmail: 'https://mail.aol.com', name: 'AOL Mail', host: 'imap.aol.com', help: 'https://login.aol.com/account/security' },
+  fastmail: { webmail: 'https://app.fastmail.com', name: 'Fastmail', host: 'imap.fastmail.com', help: 'https://app.fastmail.com/settings/security/apppasswords' },
+  zoho: { webmail: 'https://mail.zoho.com', name: 'Zoho Mail', host: 'imap.zoho.com' },
+  gmx: { webmail: 'https://www.gmx.com', name: 'GMX', host: 'imap.gmx.com' },
 };
 const PROVIDER_DOMAINS = {
   'gmail.com': 'gmail', 'googlemail.com': 'gmail', 'outlook.com': 'outlook', 'hotmail.com': 'outlook', 'live.com': 'outlook',
@@ -803,9 +816,19 @@ async function detectProvider(email) {
   if (connected()) {
     const r = await ask('provider', { domain }, 6000);
     if (r.provider === 'google') return { ...PROVIDERS.workspace, port: 993, secure: true };
-    if (r.provider === 'microsoft') return { ...PROVIDERS.outlook, name: 'Microsoft 365', port: 993, secure: true };
+    if (r.provider === 'microsoft') return { ...PROVIDERS.outlook, name: 'Microsoft 365', webmail: 'https://outlook.office.com/mail', port: 993, secure: true };
   }
   return { name: domain, host: domain ? `imap.${domain}` : '', port: 993, secure: true };
+}
+
+async function webmailFor(email) {
+  const domain = String(email).split('@')[1]?.toLowerCase() || '';
+  const key = `webmail:${domain}`;
+  const cached = (await chrome.storage.local.get(key))[key];
+  if (cached) return cached;
+  const { webmail = '' } = await detectProvider(email);
+  if (webmail) await chrome.storage.local.set({ [key]: webmail });
+  return webmail;
 }
 
 async function popupState() {

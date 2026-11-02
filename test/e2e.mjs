@@ -266,6 +266,19 @@ try {
   check('pausing Latch stops all fills', r.status === 'paused', r.status);
   await popup.locator('.foot .switch').click();
 
+  // 16. No inbox connected: Latch tells the AI to fetch the code from webmail itself.
+  await popup.evaluate(() => chrome.runtime.sendMessage({ type: 'removeMailbox' }));
+  sites.accounts.get(`later.localhost|${MAIN.email}`).verified = false;
+  await later.goto(url('later.localhost', '/settings/verify'));
+  const laterTab = await tabIdOf(later);
+  r = await tool('verify_email', later);
+  check('without an inbox, the AI is told to read the code in webmail', r.status === 'check_inbox' && r.reason === 'email_code' && r.message.includes(`tab ${laterTab}`), r.status);
+  // Play the AI: read the newest message from the site in "webmail" and type the code in.
+  const newest = mailbox.messages.filter(m => /later\.localhost/.test(m.raw)).at(-1).raw;
+  await later.fill('#o', /code to confirm your email: (\S+)/.exec(newest)[1]);
+  await later.click('button[type=submit]');
+  check('the AI can finish the step from the inbox itself', sites.accounts.get(`later.localhost|${MAIN.email}`).verified === true);
+
   await popup.reload();
   await popup.waitForSelector('.identity');
   await popup.screenshot({ path: join(out, 'popup-home.png') });

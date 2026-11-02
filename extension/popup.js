@@ -134,7 +134,7 @@ async function inboxScreen() {
   },
     editing ? backButton('settings') : h('p', { class: 'step' }, 'Step 2 of 2'),
     h('h1', {}, 'Connect your inbox'),
-    h('p', { class: 'lede' }, 'Optional. With it, Latch enters emailed verification codes for you, opening only recent messages from the site being signed in to. Without it, your AI asks you for the code.'),
+    h('p', { class: 'lede' }, 'Optional. With it, Latch enters emailed verification codes for you, opening only recent messages from the site being signed in to. Without it, your AI reads the code from your inbox in another tab.'),
     card,
     h('label', { class: 'field' }, h('span', {}, 'App password'), pass),
     h('details', { class: 'adv' }, h('summary', {}, 'Server settings'),
