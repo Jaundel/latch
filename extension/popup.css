@@ -465,7 +465,7 @@ details.adv[open] summary::before { content: "\2212  "; }
 
 /* Activity */
 .act { grid-template-columns: 8px 1fr; }
-.tone { width: 8px; height: 8px; border-radius: 50%; background: var(--line-2); }
+.tone { width: 8px; height: 8px; border-radius: 50%; background: var(--fg-3); }
 .tone.good { background: var(--ok-dot); }
 .tone.wait { background: #d4a020; }
 .tone.bad { background: var(--danger); }
