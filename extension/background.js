@@ -89,7 +89,7 @@ function updateVault(fn) {
   return run;
 }
 
-const DEFAULT_SETTINGS = { paused: false, askNewSites: true, newPasswords: 'unique' };
+const DEFAULT_SETTINGS = { paused: false, askNewSites: false, newPasswords: 'unique' };
 
 async function getMeta() {
   const m = await chrome.storage.local.get(['settings', 'allowed', 'pending', 'activity', 'usedMail']);

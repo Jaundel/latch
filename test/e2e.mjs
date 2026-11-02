@@ -77,6 +77,7 @@ await popup.screenshot({ path: join(out, 'popup-setup.png') });
 // ---------- setup through the popup, as the user would
 await popup.fill('#email', MAIN.email);
 await popup.fill('#password', MAIN.password);
+await popup.check('form .check input');
 await popup.click('button[type=submit]');
 await popup.waitForSelector('#app-password');
 await popup.fill('#app-password', APP_PASSWORD);
