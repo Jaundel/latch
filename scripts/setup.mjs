@@ -3,7 +3,7 @@
 //   npm run setup -- --claude-code   add to Claude Code (user scope)
 //   npm run setup -- --claude-desktop
 //   npm run setup -- --codex
-import { execFileSync } from 'node:child_process';
+import { execSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -15,7 +15,7 @@ const extension = join(root, 'extension');
 const args = new Set(process.argv.slice(2));
 
 function claudeCode() {
-  execFileSync('claude', ['mcp', 'add', '--scope', 'user', 'latch', '--', 'node', server], { stdio: 'inherit', shell: process.platform === 'win32' });
+  execSync(`claude mcp add --scope user latch -- node "${server}"`, { stdio: 'inherit' });
 }
 
 function claudeDesktop() {
