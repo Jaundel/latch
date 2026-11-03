@@ -4,7 +4,7 @@ import { chromium } from 'playwright';
 import { fileURLToPath } from 'node:url';
 
 let browser;
-before(async () => { browser = await chromium.launch({ channel: 'chromium' }); });
+before(async () => { browser = await chromium.launch({ channel: 'chrome' }); });
 after(async () => { await browser?.close(); });
 
 async function withPage(html, fn) {

@@ -18,7 +18,9 @@ You enter your email and password once, in the Latch extension. When your AI hit
 
 The popup's **This tab** section runs the same flows on the page you're looking at: Sign in here, Create account here, Verify email.
 
-Each tool takes an optional `tabId` (the Chrome tab ID from the AI's browser tools) and returns JSON with `status`, `site` and a one-line `message`.
+Each tool takes an optional `tabId` (the Chrome tab ID from the AI's browser tools) or `url` (the tab's current address, for tools that drive Chrome over DevTools, such as Playwright, and have no extension tab IDs), and returns JSON with `status`, `site` and a one-line `message`.
+
+Several Chromes can run Latch at once, for example your everyday profile and a separate automation profile. Each keeps its own vault and its own connection to the server. When more than one is connected, the server asks each whether it has the tab (by `tabId` or `url`) and sends the call to that one, preferring the browser whose window is in front, then the most recent connection.
 
 Results also include visible `paths` (email, password, supported social providers, SSO, account creation and guest access), `next_action`, and `evidence` containing attempted actions and observed page signals. These describe available choices; Latch does not click social sign-in automatically. A `lock_text` signal means lock-related wording was observed, not that the account is known to be locked.
 
@@ -71,6 +73,12 @@ CAPTCHAs, codes sent to your phone, authenticator apps, passkeys, push approvals
 `npm run package` builds `dist/latch-<version>.zip` for the Chrome Web Store, without the development key. `docs/STORE.md` has the listing text, permission justifications and data disclosures. `docs/PRIVACY.md` is the privacy policy to host and link. After the first upload, put the store's extension ID in `STORE_ID` in `extension/id.js`.
 
 ## Test
+
+`npm run test:chrome` runs the page/popup checks in installed Google Chrome and the
+socket-routing bridge fixture without Chromium. These are local fixtures; they do not
+establish successful authentication on a real employer site. The bridge checks the
+worker protocol as well as its build, and `inspect_connection` reports routing health
+without invoking authentication.
 
 ```
 npm test

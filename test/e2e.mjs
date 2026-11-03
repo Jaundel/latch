@@ -333,6 +333,21 @@ try {
   const filled = await apply.inputValue('#ae');
   check('fill_email types the address into the focused field', r.status === 'filled' && filled === MAIN.email, r.status);
 
+  // 14a. Tools that drive Chrome over DevTools name the tab by its address, not a tab ID.
+  const byUrl = async (name, address) => {
+    const res = await mcp.callTool({ name, arguments: { url: address } }, undefined, { timeout: 120000 });
+    const text = res.content?.[0]?.text || '';
+    transcript.push({ name, text });
+    return JSON.parse(text);
+  };
+  await apply.reload();
+  const front = await context.newPage();
+  r = await byUrl('fill_email', apply.url());
+  check('a tab named by its address is found while another tab is in front', r.status === 'filled' && await apply.inputValue('#ae') === MAIN.email, r.status);
+  r = await byUrl('fill_email', url('jobs.localhost', '/no-such-page'));
+  check('an address no tab shows is refused', r.status === 'error' && front.url() === 'about:blank', r.status);
+  await front.close();
+
   for (const name of ['sign_in', 'create_account']) {
     await apply.reload();
     r = await tool(name, apply);

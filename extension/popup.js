@@ -64,12 +64,16 @@ function passwordInput(id, attrs) {
   return h('div', { class: 'input' }, input, peek);
 }
 
-function favicon(host) {
+const favicons = new Map();
+function favicon(host, placement = 'account') {
+  const key = `${placement}:${host}`;
+  if (favicons.has(key)) return favicons.get(key);
   const letter = (host || '?').replace(/^www\./, '')[0] || '?';
   const box = h('span', { class: 'fav', 'aria-hidden': 'true' }, letter);
+  favicons.set(key, box);
   if (host && !/\.(test|localhost)$|^localhost$|^[\d.]+$/.test(host)) {
     const img = h('img', { alt: '', src: chrome.runtime.getURL(`/_favicon/?pageUrl=${encodeURIComponent('https://' + host)}&size=32`) });
-    img.onload = () => box.replaceChildren(img);
+    img.onload = () => { img.onload = null; box.replaceChildren(img); };
   }
   return box;
 }
@@ -263,7 +267,7 @@ function pageCard() {
   const result = tabRun && !tabRun.busy ? outcome(tabRun) : null;
   return h('section', { class: 'page', 'aria-label': 'This page' },
     h('div', { class: 'page-head' },
-      page.host ? favicon(page.host) : null,
+      page.host ? favicon(page.host, 'page') : null,
       h('div', { style: 'min-width:0' },
         page.host ? h('div', { class: 'page-host', title: page.host }, page.host) : null,
         h('div', { class: 'page-title' }, info.title))),
