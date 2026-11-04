@@ -2,15 +2,34 @@
 // sign-in, sign-up and verification flows in the AI's tab. Results sent back to
 // the server carry statuses only, never credentials or codes.
 
-import { fingerprint } from './build.js';
+import { fingerprint, BRIDGE_PROTOCOL } from './build.js';
 import { baseDomain, siteFor } from './domains.js';
 import { classifySignInError } from './auth-result.js';
 import { mainPasswordRisk } from './guard.js';
 
 const PORT = 47801;
-const loadedBuild = fingerprint(name => fetch(chrome.runtime.getURL(name)).then(response => response.text()));
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const now = () => Date.now();
+
+// Chrome restarts an idle worker from the code it loaded at install or reload, even after the
+// files change, so the build is fingerprinted once per load and kept for later restarts.
+const loadReason = new Promise(resolve => {
+  chrome.runtime.onInstalled.addListener(() => resolve('installed'));
+  chrome.runtime.onStartup.addListener(() => resolve('startup'));
+  setTimeout(() => resolve('other'), 5000);
+});
+const loadedBuild = (async () => {
+  const { build } = await chrome.storage.session.get('build');
+  if (build) return build;
+  // A browser restart or re-enable runs the code from the last install or reload.
+  let loaded = await loadReason !== 'installed' && (await chrome.storage.local.get('build')).build;
+  if (!loaded) {
+    loaded = await fingerprint(name => fetch(chrome.runtime.getURL(name)).then(response => response.text()));
+    await chrome.storage.local.set({ build: loaded });
+  }
+  await chrome.storage.session.set({ build: loaded });
+  return loaded;
+})();
 
 // ---------- domains
 
@@ -96,6 +115,8 @@ async function getMeta() {
 // ---------- bridge to the local MCP server
 
 const bridge = { ws: null, clients: [], replies: new Map(), seq: 0, retry: 0 };
+// Calls queued or running, by id, each tied to the socket it came on.
+const jobs = new Map();
 
 function connect() {
   if (bridge.ws && bridge.ws.readyState <= WebSocket.OPEN) return;
@@ -107,9 +128,11 @@ function connect() {
   }
   bridge.ws = ws;
   ws.onopen = () => { bridge.retry = 0; notifyPopup(); };
-  ws.onmessage = e => onBridgeMessage(e.data);
+  ws.onmessage = e => onBridgeMessage(ws, e.data);
   ws.onerror = () => {};
   ws.onclose = () => {
+    // The server that asked is gone, so nobody is waiting for its calls any more.
+    for (const job of jobs.values()) if (job.ws === ws) job.cancelled = true;
     if (bridge.ws !== ws) return;
     bridge.ws = null;
     bridge.clients = [];
@@ -129,6 +152,11 @@ function send(msg) {
   return true;
 }
 
+// An answer goes back only on the socket its request came on, never to a server that connected later.
+function reply(ws, msg) {
+  return ws === bridge.ws && send(msg);
+}
+
 function ask(type, request, timeoutMs) {
   return new Promise(resolve => {
     const id = `x${++bridge.seq}`;
@@ -138,19 +166,37 @@ function ask(type, request, timeoutMs) {
   });
 }
 
-async function onBridgeMessage(raw) {
+async function onBridgeMessage(ws, raw) {
   let msg;
   try { msg = JSON.parse(raw); } catch { return; }
   if (msg.type === 'hello') {
     bridge.clients = (msg.clients || []).map(c => String(c).slice(0, 60)).slice(0, 8);
     notifyPopup();
-    send({ type: 'ready', build: await loadedBuild });
+    reply(ws, { type: 'ready', build: await loadedBuild, protocol: BRIDGE_PROTOCOL });
   } else if (msg.type === 'reply') {
     bridge.replies.get(msg.id)?.(msg.result || {});
+  } else if (msg.type === 'locate') {
+    reply(ws, { type: 'located', id: msg.id, ...await locateTab(msg.args || {}) });
   } else if (msg.type === 'call') {
-    const result = await enqueue(() => runTool(msg.tool, msg.args || {}, String(msg.client || '').slice(0, 60)));
-    send({ type: 'result', id: msg.id, result });
+    const job = { ws, deadline: Number(msg.deadline) || Infinity, cancelled: false, acted: false };
+    const client = String(msg.client || '').slice(0, 60);
+    jobs.set(msg.id, job);
+    const result = await enqueue(() => (stopped(job) ? skipped(msg.tool, client) : runTool(msg.tool, msg.args || {}, client, job)));
+    jobs.delete(msg.id);
+    reply(ws, { type: 'result', id: msg.id, result });
+  } else if (msg.type === 'cancel') {
+    const job = jobs.get(msg.id);
+    if (job?.ws === ws) job.cancelled = true;
   }
+}
+
+// The server gave up on the call at its deadline, or the server went away.
+const stopped = job => !!job && (job.cancelled || now() > job.deadline);
+
+async function skipped(tool, client) {
+  const result = { status: 'expired', message: 'Latch skipped this call because its time ran out before it could start. Nothing was filled; call it again if it is still needed.' };
+  await recordActivity(tool, result, client).catch(() => {});
+  return result;
 }
 
 setInterval(() => send({ type: 'ping' }), 20000);
@@ -170,7 +216,15 @@ function enqueue(fn) {
 // ---------- page access
 
 let observation = null; // Tools execute serially; contains metadata only, never field values.
+let activeJob = null;   // the bridge call the running tool serves, if any
 const authBackoff = new Map();
+
+// Thrown at the next fill, submit or link once the caller has stopped waiting.
+class Stopped extends Error {}
+function beforeAction() {
+  if (stopped(activeJob)) throw new Stopped();
+  if (activeJob) activeJob.acted = true;
+}
 
 async function measured(phase, action) {
   const started = now();
@@ -190,6 +244,7 @@ async function snapshot(tabId, { observe = true } = {}) {
 }
 
 async function inFrame(tabId, frameId, op, arg) {
+  if (['fillAndSubmit', 'fillCode', 'fillOne'].includes(op)) beforeAction();
   const started = now();
   const [res] = await chrome.scripting.executeScript({
     target: { tabId, frameIds: [frameId] },
@@ -250,6 +305,8 @@ async function settlePage(tabId, before, ms) {
   let snap = [];
   await sleep(300);
   while (now() < end) {
+    // A cancelled flow ends here rather than drawing conclusions from a page that has not settled.
+    if (stopped(activeJob)) throw new Stopped();
     const tab = await chrome.tabs.get(tabId).catch(() => null);
     if (!tab) return [];
     snap = await snapshot(tabId);
@@ -416,6 +473,7 @@ async function inboxFallback(ctx, host, kind) {
 }
 
 async function openPrivately(ctx, url) {
+  beforeAction();
   const tab = await chrome.tabs.create({ url, active: false, windowId: ctx.tab.windowId });
   await sleep(500);
   await tabReady(tab.id, 20000);
@@ -824,17 +882,34 @@ async function fillEmail(ctx) {
 
 const FLOWS = { sign_in: signIn, create_account: createAccount, verify_email: verifyEmail, fill_email: fillEmail };
 
-async function resolveTab(tabId) {
+// Tools that drive Chrome over DevTools know a tab by its address, not by its extension tab ID.
+async function resolveTab({ tabId, url } = {}) {
   if (Number.isInteger(tabId)) return chrome.tabs.get(tabId).catch(() => null);
+  if (typeof url === 'string' && url) {
+    const tabs = await chrome.tabs.query({});
+    const bare = u => String(u || '').split('#')[0];
+    const exact = t => t.url === url || t.pendingUrl === url;
+    return tabs.find(t => exact(t) && t.active) || tabs.find(exact) || tabs.find(t => bare(t.url) === bare(url)) || null;
+  }
   const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
   return tab || null;
 }
 
-async function runTool(tool, args, client = '') {
+// The server asks this when several browsers are connected, to send the call to the right one.
+async function locateTab(args) {
+  const tab = await resolveTab(args).catch(() => null);
+  if (!tab) return { found: false, focused: false };
+  const win = await chrome.windows.get(tab.windowId).catch(() => null);
+  return { found: true, focused: !!win?.focused };
+}
+
+async function runTool(tool, args, client = '', job = null) {
   const started = now();
   observation = { snap: [], actions: [], detection_ms: 0, fill_submit_ms: 0, page_wait_ms: 0, verification_ms: 0 };
+  activeJob = job;
   let vault;
   let result;
+  let tab = null;
   try {
     vault = await readVault();
     const meta = await getMeta();
@@ -845,16 +920,27 @@ async function runTool(tool, args, client = '') {
     } else if (!FLOWS[tool]) {
       result = { status: 'error', message: 'Unknown Latch tool.' };
     } else {
-      const tab = await resolveTab(args.tabId);
+      tab = await resolveTab(args);
       result = tab
         ? await FLOWS[tool]({ tab, tabId: tab.id, vault, meta, verified: false })
-        : { status: 'error', message: 'That tab does not exist. Pass the tabId from your browser tools.' };
+        : { status: 'error', message: !Number.isInteger(args.tabId) && args.url
+          ? 'No open tab shows that address. Pass the tab\'s current URL or its tabId.'
+          : 'That tab does not exist. Pass the tabId from your browser tools.' };
       if (tab && tool !== 'fill_email') await clearAll(tab.id);
     }
   } catch (err) {
-    console.warn('latch:', tool, err?.name || 'error');
-    result = { status: 'error', message: 'Latch hit a problem on this page. Try again, or ask the user to sign in themselves.' };
+    if (err instanceof Stopped) {
+      // Nothing more is filled or submitted; values Latch already put in the page are cleared.
+      if (tab && tool !== 'fill_email') await clearAll(tab.id);
+      result = job.acted
+        ? { status: 'outcome_unknown', reason: 'cancelled', message: 'Latch stopped partway because the caller stopped waiting, so the page may already have changed. Inspect the tab before doing anything else.' }
+        : { status: 'expired', message: 'Latch stopped before filling anything because the caller stopped waiting. Call it again if it is still needed.' };
+    } else {
+      console.warn('latch:', tool, err?.name || 'error');
+      result = { status: 'error', message: 'Latch hit a problem on this page. Try again, or ask the user to sign in themselves.' };
+    }
   }
+  activeJob = null;
   const snap = observation.snap;
   result.paths = Object.assign({}, ...snap.map(f => f.paths));
   // Merge across frames without letting a later false hide a visible alternative.
@@ -875,7 +961,8 @@ async function runTool(tool, args, client = '') {
   result.next_action ||= ({ signed_in: 'continue', no_account: 'open_signup', account_exists: 'sign_in',
     account_created: 'inspect_page', check_inbox: 'verify_email', verification_pending: 'verify_email',
     needs_user: 'inspect_required_step', form_incomplete: 'complete_noncredential_fields',
-    wrong_password: 'stop_retries', sign_in_failed: 'inspect_page', unconfirmed: 'inspect_page', no_form: 'inspect_page' })[result.status];
+    wrong_password: 'stop_retries', sign_in_failed: 'inspect_page', unconfirmed: 'inspect_page', no_form: 'inspect_page',
+    outcome_unknown: 'inspect_page' })[result.status];
   result.timings = { scope: 'tool_call', total_ms: now() - started, detection_ms: observation.detection_ms, fill_submit_ms: observation.fill_submit_ms,
     page_wait_ms: observation.page_wait_ms, verification_ms: observation.verification_ms };
   observation = null;
@@ -998,7 +1085,10 @@ const popupHandlers = {
   reveal: async ({ host }) => ({ password: (await readVault()).sites[host]?.password || '' }),
   forget: async ({ host }) => { await updateVault(v => { delete v.sites[host]; }); return { ok: true }; },
   erase: async () => {
+    // The build of the loaded code is not user data, and a later browser restart still needs it.
+    const { build } = await chrome.storage.local.get('build');
     await chrome.storage.local.clear();
+    if (build) await chrome.storage.local.set({ build });
     await keyStore('readwrite', s => s.clear());
     keyPromise = null;
     return { ok: true };
