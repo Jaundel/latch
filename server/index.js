@@ -58,6 +58,13 @@ const Result = z.object({
     .map(key => [key, z.number().int().nonnegative()]))).optional(),
 });
 
+const TOOLS = new Set(['application_page', 'create_account', 'fill_email', 'inspect_connection', 'request_password_recovery', 'sign_in', 'verify_email']);
+
+function checkedResult(tool, result) {
+  const safe = (tool === 'application_page' ? ApplicationResult : Result).safeParse(result);
+  return safe.success ? safe.data : { status: 'error', message: 'Latch returned an unexpected result.' };
+}
+
 const EXTENSION_DIR = process.env.LATCH_EXTENSION_DIR || fileURLToPath(new URL('../extension/', import.meta.url));
 
 // File timestamps can change without a code update (checkout, sync or editor). A file that cannot
@@ -199,6 +206,8 @@ async function onPeerMessage(ws, data) {
     ws.clientName = String(msg.client || '').slice(0, 60);
     greetExtensions();
   } else if (msg.type === 'call') {
+    // Anything local can reach this socket, so it gets the same tools and result shape as an MCP client.
+    if (!TOOLS.has(msg.tool)) return send(ws, { type: 'result', id: msg.id, result: { status: 'error', message: 'Unknown Latch tool.' } });
     let result;
     try {
       result = msg.tool === 'inspect_connection' ? await inspectConnection(msg.args) :
@@ -207,7 +216,7 @@ async function onPeerMessage(ws, data) {
       log(`relayed ${String(msg.tool).slice(0, 40)} failed: ${err.code || err.name}`);
       result = msg.tool === 'inspect_connection' ? CHECK_FAILED : FAILED;
     }
-    send(ws, { type: 'result', id: msg.id, result });
+    send(ws, { type: 'result', id: msg.id, result: checkedResult(msg.tool, result) });
   }
 }
 
@@ -227,7 +236,7 @@ function locate(ws, args) {
     const timer = setTimeout(() => done({}), 2000);
     Object.assign(done, { ws, kind: 'locate' });
     pending.set(id, done);
-    if (!send(ws, { type: 'locate', id, args: { tabId: args?.tabId, url: args?.url } })) done({});
+    if (!send(ws, { type: 'locate', id, args: { tabId: args?.tabId, url: args?.url, application: args?.application, exactUrl: args?.exactUrl } })) done({});
   });
 }
 
@@ -259,15 +268,30 @@ async function look(args) {
 
 // Waits up to 30 s for a browser when none is ready. While this owner is new it also keeps
 // waiting for a browser that has not connected yet before reporting the tab missing.
-async function survey(args) {
+async function survey(args, { reload = false } = {}) {
   const started = Date.now();
   for (;;) {
     const found = await look(args);
     if (found.status === 'ready') return found;
-    const until = Math.min(started + 30000, found.connections.ready ? listeningSince + SETTLE_MS : Infinity);
+    let until = Math.min(started + 30000, found.connections.ready ? listeningSince + SETTLE_MS : Infinity);
+    if (reload && found.status === 'reload_required' && await askStaleReload()) until = Math.max(until, Math.min(started + 30000, Date.now() + 15000));
     if (Date.now() >= until) return found;
     await nextReady(until - Date.now());
   }
+}
+
+// An extension running files older than the ones on disk is asked to reload itself, so an update
+// does not wait for someone to press Reload on chrome://extensions. The extension refuses while busy.
+const reloadAsked = new Map(); // build -> time of the last request
+async function askStaleReload() {
+  const build = await extensionBuild();
+  if (!wss || !build) return false;
+  const since = Date.now() - (reloadAsked.get(build) || 0);
+  if (since < 60000) return since < 20000;
+  let asked = false;
+  for (const [ws, e] of extensions) if (e.ready && e.build !== build && send(ws, { type: 'reload', build })) asked = true;
+  if (asked) { reloadAsked.set(build, Date.now()); log('asked an out-of-date extension to reload'); }
+  return asked;
 }
 
 // Read-only bridge/target inspection. Never asks an extension to run an authentication flow.
@@ -287,7 +311,15 @@ async function pickExtension(args, { current, target }) {
 }
 
 async function callExtension(tool, args, timeoutMs, client = clientName, peer = null) {
-  const found = await survey(args);
+  const app = tool === 'application_page';
+  const recovery = tool === 'request_password_recovery';
+  const found = await survey(app || recovery ? { ...args, application: true, exactUrl: recovery } : args, { reload: true });
+  if (app && args.operation === 'open' && found.status === 'tab_not_found' && !Number.isInteger(args.tabId) &&
+      found.connections.connected === 1 && found.connections.ready === 1 && found.connections.current === 1 && found.connections.lookup_replies === 1) {
+    found.status = 'ready';
+    found.target = [{ ws: found.current[0][0], found: true }];
+  }
+  if ((app || recovery) && found.target.length > 1) return { status: 'blocked', message: 'The target is present in multiple connected browsers; routing is ambiguous.' };
   const refused = { unavailable: UNAVAILABLE, reload_required: RELOAD_REQUIRED, tab_not_found: TAB_NOT_FOUND }[found.status];
   if (refused) return { ...refused, reason: found.reason };
   const ws = await pickExtension(args, found);
@@ -365,8 +397,7 @@ async function call(tool, args, timeoutMs) {
     log(`${tool} failed: ${err.code || err.name}`);
     result = lost || FAILED;
   }
-  const safe = Result.safeParse(result);
-  const out = safe.success ? safe.data : { status: 'error', message: 'Latch returned an unexpected result.' };
+  const out = checkedResult(tool, result);
   log(`${tool} -> ${out.status}`);
   return { content: [{ type: 'text', text: JSON.stringify(out) }] };
 }
@@ -391,11 +422,49 @@ const tabArg = {
   url: z.string().url().max(65536).optional().describe('The tab\'s current address, for browser tools that do not expose Chrome tab IDs (Playwright, DevTools). Used when tabId is not given.'),
 };
 
+const ApplicationResult = z.object({
+  status: z.string().regex(/^[a-z_]{2,40}$/), message: z.string().max(600).optional(),
+  reason: z.string().max(80).optional(), next_action: z.string().max(80).optional(),
+  tabId: z.number().int().optional(), url: z.string().max(65536).optional(),
+  page: z.unknown().optional(), snapshot: z.unknown().optional(), results: z.unknown().optional(),
+});
+const appValue = z.union([z.string().max(20000), z.number(), z.boolean(), z.array(z.string().max(20000)).max(100), z.null()]);
+const appFill = z.object({
+  id: z.string().max(500), label: z.string().max(1000), kind: z.string().max(80), action: z.string().max(80),
+  value: appValue, parts: z.array(z.string().max(100)).max(20).optional(),
+  document: z.object({ name: z.string().max(255), mime: z.string().max(120), base64: z.string().max(700000).regex(/^[A-Za-z0-9+/]*={0,2}$/), sha256: z.string().regex(/^[a-f0-9]{64}$/i) }).strict().optional(),
+}).strict();
+const appEntries = z.object(Object.fromEntries(['work', 'education', 'websites', 'languages', 'projects'].map(key =>
+  [key, z.union([z.number().int().min(0).max(100), z.array(z.unknown()).max(100)]).optional()]))).strict();
+server.registerTool('application_page', {
+  title: 'Work on an application page',
+  description: 'Open, scan, fill, advance, organize or close a specific application tab using typed application data.',
+  inputSchema: {
+    operation: z.enum(['open', 'scan', 'fill', 'next', 'organize', 'close']),
+    url: z.string().url().max(65536).refine(value => { try { const u = new URL(value); return ['http:', 'https:'].includes(u.protocol) && !u.username && !u.password; } catch { return false; } }),
+    tabId: z.number().int().nonnegative().optional(), fills: z.array(appFill).max(200).optional(),
+    entries: appEntries.optional(), ready: z.boolean().optional(),
+  },
+}, args => {
+  if ((args.operation !== 'open' && !Number.isInteger(args.tabId)) || (args.operation === 'organize' && typeof args.ready !== 'boolean')) return { content: [{ type: 'text', text: JSON.stringify({ status: 'blocked', message: 'This operation requires a tab ID and organize requires ready.' }) }] };
+  if (Buffer.byteLength(JSON.stringify(args), 'utf8') > 850000) return { content: [{ type: 'text', text: JSON.stringify({ status: 'blocked', message: 'Application data exceeds the bridge size limit.' }) }] };
+  return call('application_page', args, 58000);
+});
+
 server.registerTool('inspect_connection', {
   title: 'Check browser connection',
   description: 'Read-only check of connected extension builds and whether a browser can locate the requested tab. Never signs in, fills fields, creates an account or reads credentials. Ready verifies routing only, not account setup.',
   inputSchema: tabArg,
 }, args => call('inspect_connection', args, 10000));
+
+server.registerTool('request_password_recovery', {
+  title: 'Request password recovery',
+  description: 'On the exact HTTPS tab already showing an explicit password recovery form, privately request recovery instructions for the active account saved on that exact host (on a job portal with no active saved account, the user\'s email). This never follows a recovery link, enters a code or changes a password. The user finishes the reset from the Latch popup; do not request again, and try sign_in on a later run. A page-side deadline is enforced; cancellation is best effort until delivered. If interrupted or timed out, inspect the page before any retry because the request may have been sent.',
+  inputSchema: {
+    url: z.string().url().max(65536).refine(value => { try { const u = new URL(value); return u.protocol === 'https:' && !u.username && !u.password; } catch { return false; } }),
+    tabId: z.number().int().nonnegative().optional(),
+  },
+}, args => call('request_password_recovery', args, 30000));
 
 server.registerTool('sign_in', {
   title: 'Sign in',
@@ -410,8 +479,8 @@ server.registerTool('create_account', {
   title: 'Create account',
   description:
     'Create an account for the user on the sign-up page open in a Chrome tab. Before calling, fill any other fields yourself ' +
-    '(name, etc.) and tick required boxes, but leave email and password fields empty. Latch fills the user\'s email and a new ' +
-    'strong password, saves it, submits, and completes email verification (codes or links). If the result lists missing fields, ' +
+    '(name, etc.) and tick required boxes, but leave email and password fields empty. Latch fills the user\'s email and uses ' +
+    'the saved New account passwords setting (Same as mine or Unique), then saves, submits and verifies email. If the result lists missing fields, ' +
     'fill them and call again; a retry reuses the same saved password.',
   inputSchema: tabArg,
 }, args => call('create_account', args, 58000));
@@ -442,13 +511,15 @@ server.server.oninitialized = () => {
 };
 
 await claimRole().catch(err => log(`could not open the Chrome bridge: ${err.code || err.message}`));
-await server.connect(new StdioServerTransport());
+// Optional persistent owner for repeated local jobctl runs; ordinary MCP clients still use stdio.
+const bridgeOnly = process.argv.includes('--bridge-only');
+if (!bridgeOnly) await server.connect(new StdioServerTransport());
 
 const shutdown = () => {
   wss?.close();
   upstream?.close();
   process.exit(0);
 };
-process.stdin.on('end', shutdown);
+if (!bridgeOnly) process.stdin.on('end', shutdown);
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);

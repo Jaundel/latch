@@ -231,6 +231,8 @@ details.adv[open] summary::before { content: "\2212  "; }
 .adv-grid .full { grid-column: 1 / -1; }
 .adv-grid .field { margin: 0; }
 
+.sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+
 .notice { margin: 0 0 12px; font-size: 12px; color: var(--fg-2); min-height: 17px; }
 .notice.bad { color: var(--danger); }
 .notice.good { color: var(--ok); }
@@ -310,6 +312,12 @@ details.adv[open] summary::before { content: "\2212  "; }
 
 .row .name { font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .row .sub { color: var(--fg-3); font-size: 12px; }
+
+/* Password resets */
+.row.reset { grid-template-columns: 24px 1fr; row-gap: 6px; }
+.row.reset .note { grid-column: 2; color: var(--fg-2); font-size: 12px; }
+.row-buttons { grid-column: 2; display: flex; align-items: center; gap: 6px; }
+.row-action:disabled { opacity: .45; cursor: default; }
 .row .secret {
   grid-column: 2 / -1;
   display: flex;

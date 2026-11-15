@@ -13,7 +13,10 @@ const work = mkdtempSync(join(tmpdir(), 'latch-loading-'));
 const ext = join(work, 'extension');
 cpSync(join(root, 'extension'), ext, { recursive: true });
 const bg = join(ext, 'background.js');
-writeFileSync(bg, readFileSync(bg, 'utf8').replace('const PORT = 47801;', 'const PORT = 47821;'));
+const bgSource = readFileSync(bg, 'utf8');
+const bgMoved = bgSource.replace('const PORT = 47801;', 'const PORT = 47821;');
+if (bgMoved === bgSource) throw new Error('background.js has no "const PORT = 47801;" line, so the test copy could reach the live bridge');
+writeFileSync(bg, bgMoved);
 const timers = new Set();
 let posts = 0;
 const site = createServer((req, res) => {

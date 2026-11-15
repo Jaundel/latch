@@ -21,17 +21,72 @@
     if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse') return false;
     const r = el.getBoundingClientRect();
     if (r.width < 4 || r.height < 4) return false;
-    return r.right > 0 && r.bottom > 0 && r.left < innerWidth + 2000;
+    return r.right > 0 && r.bottom + scrollY > 0 && r.left < innerWidth + 2000;
   }
 
   const textOf = node => (node?.innerText || node?.textContent || '').replace(/\s+/g, ' ').trim();
+
+  // Shadow roots are collected once per scan, so repeated lookups stay cheap.
+  let scanRoots = null;
+  function shadowOf(el) {
+    if (el.shadowRoot) return el.shadowRoot;
+    try { return globalThis.chrome?.dom?.openOrClosedShadowRoot?.(el) || null; } catch { return null; }
+  }
+  function collectRoots(root = document, out = []) {
+    for (const el of root.querySelectorAll('*')) {
+      const shadow = shadowOf(el);
+      if (shadow) { out.push(shadow); collectRoots(shadow, out); }
+    }
+    return out;
+  }
+  const shadowRoots = () => scanRoots || collectRoots();
+  function scan(fn) {
+    if (scanRoots) return fn();
+    scanRoots = collectRoots();
+    try { return fn(); } finally { scanRoots = null; }
+  }
+  const treeRoot = el => { const root = el?.getRootNode?.(); return root instanceof ShadowRoot ? root : null; };
+  const lookupRoot = el => treeRoot(el) || document;
+
+  function deepContains(scope, node) {
+    for (; node; node = treeRoot(node)?.host) if (scope.contains(node)) return true;
+    return false;
+  }
+  const inside = (scope, shadow) => scope === document || (shadow !== scope && deepContains(scope, shadow.host));
+
+  function deepAll(selector, root = document) {
+    const out = [...root.querySelectorAll(selector)];
+    for (const shadow of shadowRoots()) if (inside(root, shadow)) out.push(...shadow.querySelectorAll(selector));
+    return out;
+  }
+
+  const SKIP_TEXT = /^(?:STYLE|SCRIPT|TEMPLATE|LINK|NOSCRIPT)$/;
+  const fragmentText = root => [...root.children].filter(el => !SKIP_TEXT.test(el.tagName)).map(el => el.innerText ?? el.textContent ?? '').join(' ');
+  function deepText(root, limit) {
+    let text = root === document ? (document.body?.innerText || '') : root instanceof ShadowRoot ? fragmentText(root) : (root.innerText || root.textContent || '');
+    for (const shadow of shadowRoots()) {
+      if (text.length >= limit) break;
+      if (inside(root, shadow)) text += ` ${fragmentText(shadow)}`;
+    }
+    return text.slice(0, limit);
+  }
+
+  // The nearest container around el, across shadow boundaries.
+  const CONTAINER = '[role=dialog], [role=form], section, main';
+  function containerOf(el) {
+    for (let node = el; node; node = treeRoot(node)?.host) {
+      const hit = node.closest?.(`form, ${CONTAINER}`);
+      if (hit) return hit;
+    }
+    return null;
+  }
 
   function labelText(el) {
     const parts = [];
     for (const label of el.labels || []) parts.push(textOf(label));
     parts.push(el.getAttribute('aria-label') || '');
     for (const id of (el.getAttribute('aria-labelledby') || '').split(/\s+/)) {
-      if (id) parts.push(textOf(document.getElementById(id)));
+      if (id) parts.push(textOf(lookupRoot(el).getElementById(id)));
     }
     parts.push(el.placeholder || '', el.name || '', el.id || '', el.getAttribute('autocomplete') || '');
     if (!el.labels?.length && !el.getAttribute('aria-label')) {
@@ -45,6 +100,8 @@
     'color', 'date', 'datetime-local', 'month', 'week', 'time', 'search']);
   const CONFIRM = /confirm|repeat|retype|re-?enter|again|verify/;
   const NOT_CODE = /promo|coupon|discount|zip|postal|country|area|referral|gift|invite|phone|tel\b|voucher/;
+  // SuccessFactors masks the passcode it emails, so a password input can still be a code box.
+  const ONE_TIME = /passcode|one[- ]?time[- ]?(?:pass|code)|\botp\b/;
 
   function kindOf(el) {
     if (el.tagName !== 'INPUT' || el.disabled || el.readOnly) return null;
@@ -53,6 +110,7 @@
     const auto = (el.getAttribute('autocomplete') || '').toLowerCase();
     const label = labelText(el).toLowerCase();
     if (type === 'password') {
+      if (auto.includes('one-time-code') || ONE_TIME.test(label)) return { kind: 'code' };
       return { kind: 'password', isNew: auto.includes('new-password') || /new|create|choose|set up|confirm|repeat|retype/.test(label), confirm: CONFIRM.test(label) };
     }
     if (el.maxLength === 1) return { kind: 'digit' };
@@ -72,50 +130,60 @@
   }
 
   function captchaBlocking() {
-    const widgets = [...document.querySelectorAll('iframe, .g-recaptcha, .h-captcha, .cf-turnstile, [data-sitekey]')].filter(el => {
+    const widgets = deepAll('iframe, .g-recaptcha, .h-captcha, .cf-turnstile, [data-sitekey]').filter(el => {
       if (!visible(el) || el.closest('.grecaptcha-badge')) return false;
       const hint = el.tagName === 'IFRAME' ? `${el.src} ${el.title}` : 'captcha';
       const r = el.getBoundingClientRect();
       return /captcha|challenges\.cloudflare|turnstile|arkoselabs|funcaptcha/i.test(hint) && r.width > 100 && r.height > 40;
     });
     if (!widgets.length) return false;
-    const solved = [...document.querySelectorAll('[name="g-recaptcha-response"], [name="h-captcha-response"], [name="cf-turnstile-response"]')]
+    const solved = deepAll('[name="g-recaptcha-response"], [name="h-captcha-response"], [name="cf-turnstile-response"]')
       .some(el => (el.value || '').length > 20);
     return !solved;
   }
 
   function pageFlags() {
-    const body = (document.body?.innerText || '').slice(0, 20000).toLowerCase();
-    const heads = [document.title, ...[...document.querySelectorAll('h1, h2, button, [role=button], input[type=submit]')]
+    const body = deepText(document, 20000).toLowerCase();
+    const heads = [document.title, ...deepAll('h1, h2, button, [role=button], input[type=submit]')
       .slice(0, 40).map(el => el.value || textOf(el))].join(' ').toLowerCase();
     return {
       loginish: /sign ?in|log ?in|welcome back|continue with email|enter your (e-?mail|password)/.test(heads),
       signupish: /sign ?up|create (an |your )?account|register|join|get started/.test(heads),
-      emailCode: /(sent|emailed|e-?mail(ed)? you)[^.]{0,80}(code|link)|(code|link)[^.]{0,80}(sent|emailed) to (your )?(e-?mail|inbox)|check your (e-?mail|inbox)/.test(body),
+      emailCode: /(sent|emailed|e-?mail(ed)? you)[^.]{0,80}(code|link)|(code|link)[^.]{0,80}(sent|emailed) to (your )?(e-?mail|inbox)|check your (e-?mail|inbox)|(sent|emailed)[^.]{0,80}one[- ]?time password[^.]{0,80}(e-?mail|inbox)|one[- ]?time password[^.]{0,80}(sent|emailed)[^.]{0,80}(e-?mail|inbox)/.test(body),
       phoneCode: /text message|\bsms\b|texted|phone (number )?ending|sent to (your )?(phone|mobile)|mobile number ending/.test(body),
       appCode: /authenticator|authentication app|2fa app|totp|google auth/.test(body),
       passkey: /passkey|security key|windows hello|face id|touch id|use your device/.test(body),
       push: /approve (the )?(sign-?in|request)|tap yes|check your (phone|device) for|sent a notification/.test(body),
       checkEmail: /check your (e-?mail|inbox)|verify your (e-?mail|account)|confirm your (e-?mail|account)|(sent|emailed) you (a|an) (verification |confirmation |activation )?(link|email)|(link|email) (has been )?sent to/.test(body),
+      recoverySent: /(?:sent|emailed)\b[^.]{0,100}(?:reset|recovery)[^.]{0,80}(?:link|instructions|email)|(?:reset|recovery)[^.]{0,80}(?:link|instructions|email)[^.]{0,80}(?:sent|emailed)|if (?:an? )?account (?:exists|is found)[^.]{0,100}(?:email|link|instructions)/.test(body),
       exists: /already (exists|registered|in use|taken|associated)|account (already )?exists|account with (this|that) e-?mail/.test(body),
       locked: /too many (attempts|tries)|account (is )?(locked|disabled|suspended)|temporarily (locked|blocked)/.test(body),
-      signedIn: [...document.querySelectorAll('a, button, [role=button], [role=menuitem]')].slice(0, 400)
-        .some(el => visible(el) && (/^(sign|log) ?out$/i.test(textOf(el)) || el.matches('#accountSettingsButton, [data-automation-id="accountSettingsButton"]'))),
+      resetDone: /password (?:has been |was )?(?:successfully )?(?:changed|reset|updated)|successfully (?:changed|reset|updated) (?:your )?password|sign in with your new password/.test(body),
+      signedIn: deepAll('a, button, [role=button], [role=menuitem]').slice(0, 400)
+        .some(el => visible(el) && (/^(?:sign ?out|log ?(?:out|off))$/i.test(textOf(el)) || el.matches('#accountSettingsButton, [data-automation-id="accountSettingsButton"]'))),
     };
   }
 
+  // Status lines share the live regions errors use. One that also reports trouble stays an error.
+  const PASSWORD_OK = /^(?:your )?passwords? (?:is |are |has been |was )?(?:accepted|valid|strong|match(?:es)?)[.!]?$|^password strength:? (?:good|strong|very strong|excellent)[.!]?$/i;
+  const CODE_TIMER = /\b(?:request|resend|send|get)\b[^.]{0,30}\b(?:pass ?code|code|one[- ]?time password)\b[^.]{0,20}\b(?:in|after) \d|\b(?:pass ?code|code|one[- ]?time password)\b[^.]{0,30}\bexpires? in \d/i;
+  const CODE_TROUBLE = /invalid|incorrect|wrong|expired|too many|fail|unable|could ?n.?t|can ?not|locked|blocked|not (?:valid|correct|accepted|recogni[sz]ed)/i;
+  const statusLine = text => PASSWORD_OK.test(text) || (CODE_TIMER.test(text) && !CODE_TROUBLE.test(text));
+
   function errorText() {
-    const nodes = document.querySelectorAll('[role=alert], [aria-live=assertive], [aria-live=polite], .error, .errors, .alert-danger, .invalid-feedback, [class*="error" i], [id*="error" i]');
+    const nodes = deepAll('[role=alert], [aria-live=assertive], [aria-live=polite], .error, .errors, .alert-danger, .invalid-feedback, [class*="error" i], [id*="error" i]');
     for (const node of nodes) {
       const text = textOf(node);
-      if (text && text.length > 3 && visible(node)) return text.slice(0, 160);
+      if (text && text.length > 3 && visible(node) && !statusLine(text)) return text.slice(0, 160);
     }
     return '';
   }
 
-  function inspect() {
+  const inspect = () => scan(inspectNow);
+
+  function inspectNow() {
     const fields = [];
-    for (const el of document.querySelectorAll('input')) {
+    for (const el of deepAll('input')) {
       if (!visible(el)) continue;
       const k = kindOf(el);
       if (!k) continue;
@@ -129,10 +197,11 @@
         form: el.form ? refOf(el.form) : '',
       });
     }
-    const active = document.activeElement;
+    let active = document.activeElement;
+    for (let inner; active && (inner = shadowOf(active)?.activeElement); ) active = inner;
     const focused = active && active.tagName === 'INPUT' && fields.find(f => byRef(f.ref) === active);
     const auth = authIntents(fields);
-    const choices = [...document.querySelectorAll('a, button, [role=button], input[type=submit], input[type=button]')]
+    const choices = deepAll('a, button, [role=button], input[type=submit], input[type=button]')
       .filter(visible).map(el => el.tagName === 'INPUT' ? el.value : textOf(el));
     const offers = pattern => choices.some(label => pattern.test(label));
     // Where each password form would send its data; read the attribute, since an
@@ -152,7 +221,9 @@
       captcha: captchaBlocking(),
       flags: pageFlags(),
       error: errorText(),
-      busy: [...document.querySelectorAll('[aria-busy=true], button[disabled][type=submit]')].some(visible),
+      recovery: recoveryForm(),
+      reset: resetForm(),
+      busy: deepAll('[aria-busy=true], button[disabled][type=submit]').some(visible),
       auth,
       actions,
       paths: {
@@ -164,18 +235,182 @@
         apple: offers(/(?:with|using|via)\s+apple/i),
         facebook: offers(/(?:with|using|via)\s+facebook/i),
         sso: offers(/\bsso\b|single sign.on|corporate login/i),
-        create_account: auth.signup || offers(/create\b.{0,30}\baccount|sign ?up|register/i),
+        create_account: auth.signup || offers(/create\b.{0,30}\b(?:account|profile)|sign ?up|register/i),
         guest: offers(/(?:as (?:a )?guest|guest (?:access|checkout|application)|apply without (?:an )?account)/i),
       },
     };
   }
 
-  function setValue(el, value) {
+  const sameHttps = href => {
+    try { const url = new URL(href, location.href); return url.origin === location.origin && url.protocol === 'https:'; } catch { return false; }
+  };
+  const formAction = form => form.getAttribute('action') || location.href;
+
+  // Labelled-by text, input labels and visible text, minus links and any `skip`
+  // buttons: a sign-in page says "Forgot password?" too.
+  function wordingOf(scope, skip = () => false) {
+    const el = scope instanceof Element ? scope : null;
+    const associated = (el?.getAttribute('aria-labelledby') || '').split(/\s+/).filter(Boolean)
+      .map(id => lookupRoot(el).getElementById(id)).filter(node => node && visible(node)).map(textOf);
+    let text = deepText(scope, 4000).replace(/\s+/g, ' ');
+    for (const link of deepAll('a[href]', scope)) {
+      const label = textOf(link);
+      if (label) text = text.replace(label, ' ');
+    }
+    for (const label of deepAll(BUTTONS, scope).map(buttonLabel).filter(skip)) text = text.replace(label, ' ');
+    const labels = deepAll('input', scope).filter(visible).map(labelText);
+    return `${associated.join(' ')} ${labels.join(' ')} ${text.slice(0, 1200)}`;
+  }
+
+  // Only an explicit, same-origin email recovery form is eligible. Never handle
+  // a new-password form or follow a recovery link here.
+  const RECOVERY_WORDING = /forgot (?:your )?password|reset (?:your )?password|recover (?:your )?(?:password|account)/i;
+  const RECOVERY_BUTTON = /^(?:send (?:reset |recovery )?(?:email|link|instructions)|reset password|recover (?:password|account)|continue|submit|send|next|request (?:a )?(?:reset|recovery) link|email me (?:a )?(?:reset )?link|reset)$/i;
+  const recoveryForm = () => scan(findRecovery);
+
+  function findRecovery() {
+    if (captchaBlocking()) return null;
+    const scopes = new Set();
+    for (const el of deepAll('input')) {
+      if (!visible(el) || kindOf(el)?.kind !== 'email') continue;
+      const scope = el.form || containerOf(el);
+      if (scope && (scope === el.form || scope.tagName !== 'FORM')) scopes.add(scope);
+    }
+    const candidates = [...scopes].map(recoveryIn).filter(Boolean);
+    return candidates.length === 1 ? candidates[0] : null;
+  }
+
+  function recoveryIn(scope) {
+    const isForm = scope.tagName === 'FORM';
+    // A "Forgot your password?" button leads to the recovery form; it does not make this one.
+    const leadsAway = label => RECOVERY_WORDING.test(label) && !RECOVERY_BUTTON.test(label);
+    if (!visible(scope) || !RECOVERY_WORDING.test(wordingOf(scope, leadsAway))) return null;
+    if (deepAll('input[type=password]', scope).some(visible)) return null;
+    if (isForm && !sameHttps(formAction(scope))) return null;
+    const emails = deepAll('input', scope).filter(el => visible(el) && kindOf(el)?.kind === 'email' && (isForm || !el.form));
+    const selector = isForm ? 'button,input[type=submit],input[type=button]' : 'button,input[type=submit],input[type=button],[role=button],a[href]';
+    const buttons = deepAll(selector, scope).filter(el => {
+      if (!visible(el) || el.disabled || !RECOVERY_BUTTON.test(buttonLabel(el))) return false;
+      if (isForm) return el.form === scope && sameHttps(el.getAttribute('formaction') || formAction(scope));
+      if (el.form) return false;
+      return el.tagName !== 'A' || !el.hasAttribute('href') || sameHttps(el.getAttribute('href'));
+    });
+    if (emails.length !== 1 || buttons.length !== 1) return null;
+    return { email: refOf(emails[0]), button: refOf(buttons[0]), scope: refOf(scope) };
+  }
+
+  // A new-password form reached from a recovery email. Latch fills it only when
+  // the user asks from the popup, and never presses its button.
+  const RESET_WORDING = /reset (?:your )?password|new password|change (?:your )?password|set (?:a |your )?(?:new )?password|choose (?:a )?(?:new )?password|create (?:a )?new password/i;
+  const SIGNUP_WORDING = /\bsign ?up\b|create (?:an |a |your )?(?:new )?(?:account|profile)|\bregister\b/i;
+  const CURRENT = /current|\bold|existing|temporary/;
+  const RESET_BUTTON = /\b(?:reset|change|save|update|set|submit|continue|confirm)\b/i;
+  const RESET_NOT = /cancel|back|sign ?up|register|create (?:an |your )?account|show|hide|resend|google|apple|microsoft|facebook|linkedin/i;
+  const resetForm = () => scan(findReset);
+
+  function findReset() {
+    if (captchaBlocking()) return null;
+    const scopes = new Set();
+    for (const el of deepAll('input[type=password]')) {
+      if (visible(el)) scopes.add(el.form || containerOf(el) || el.getRootNode());
+    }
+    const candidates = [...scopes].map(resetIn).filter(Boolean);
+    return candidates.length === 1 ? candidates[0] : null;
+  }
+
+  function resetIn(scope) {
+    const isForm = scope.tagName === 'FORM';
+    if (scope instanceof Element && !visible(scope)) return null;
+    const wording = wordingOf(scope);
+    if (!RESET_WORDING.test(wording) || SIGNUP_WORDING.test(wording)) return null;
+    if (isForm && !sameHttps(formAction(scope))) return null;
+    const inputs = deepAll('input', scope).filter(visible);
+    const passwords = inputs.filter(el => el.type === 'password').map(el => ({ el, k: kindOf(el), label: labelText(el).toLowerCase() }));
+    if (passwords.some(p => !p.k || CURRENT.test(p.label))) return null;
+    if (passwords.length !== 2) return null;
+    let fresh = passwords.filter(p => !p.k.confirm), confirm = passwords.filter(p => p.k.confirm);
+    if (!confirm.length && passwords.every(p => p.k.isNew)) [fresh, confirm] = [[passwords[0]], [passwords[1]]];
+    if (fresh.length !== 1 || confirm.length !== 1) return null;
+    if (inputs.some(el => !el.value && ['email', 'username', 'other'].includes(kindOf(el)?.kind))) return null;
+    // The user presses this button, so one disabled until both fields are filled still counts.
+    const buttons = deepAll(BUTTONS, scope).filter(el => {
+      const label = buttonLabel(el);
+      if (!visible(el) || !RESET_BUTTON.test(label) || RESET_NOT.test(label)) return false;
+      if (isForm && ['BUTTON', 'INPUT'].includes(el.tagName)) return el.form === scope && sameHttps(el.getAttribute('formaction') || formAction(scope));
+      if (!isForm && el.form) return false;
+      return el.tagName !== 'A' || !el.hasAttribute('href') || sameHttps(el.getAttribute('href'));
+    });
+    if (buttons.length !== 1) return null;
+    return { pw: [refOf(fresh[0].el), refOf(confirm[0].el)], button: refOf(buttons[0]), scope: refOf(scope) };
+  }
+
+  // Fills the new and confirm fields only; the user presses the page's button.
+  function fillReset({ refs: targets, value, expectedUrl } = {}) {
+    if (location.href !== expectedUrl || !Array.isArray(targets) || targets.length !== 2 || typeof value !== 'string' || !value) return { ok: false };
+    const current = resetForm();
+    if (!current || current.pw[0] !== targets[0] || current.pw[1] !== targets[1]) return { ok: false };
+    const fields = targets.map(byRef);
+    if (!fields.every(el => el?.isConnected)) return { ok: false };
+    for (const el of fields) setValue(el, value);
+    return { ok: true };
+  }
+
+  async function requestRecovery({ email, expectedUrl, runId, deadline }) {
+    let acted = false;
+    const stopped = () => typeof runId !== 'string' || !Number.isFinite(deadline) || Date.now() >= deadline || globalThis.__latchRecoveryCancelled?.has(runId);
+    const interrupted = () => ({ ok: false, stopped: true, acted });
+    if (stopped()) return interrupted();
+    if (location.href !== expectedUrl) return { ok: false };
+    const recovery = recoveryForm();
+    if (!recovery) return { ok: false };
+    const field = byRef(recovery.email), button = byRef(recovery.button);
+    if (!field || !button) return { ok: false };
+    if (stopped()) return interrupted();
+    focusOn(field);
+    if (stopped()) return interrupted();
+    field.value = email;
+    acted = true;
+    filled.add(recovery.email);
+    if (stopped()) return interrupted();
+    field.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, inputType: 'insertText' }));
+    if (stopped()) return interrupted();
+    field.dispatchEvent(new Event('change', { bubbles: true }));
+    if (stopped()) return interrupted();
+    leave(field);
+    if (stopped()) return interrupted();
+    // Give a queued cancellation a chance to reach this isolated world before submission.
+    await new Promise(resolve => setTimeout(resolve, 50));
+    if (stopped()) return interrupted();
+    const verified = recoveryForm();
+    if (location.href !== expectedUrl || !field.isConnected || !button.isConnected || !verified || verified.email !== recovery.email || verified.button !== recovery.button || (field.form && !field.form.checkValidity())) return { ok: false, acted };
+    if (stopped()) return interrupted();
+    button.click();
+    globalThis.__latchRecoveryCancelled?.delete(runId);
+    return { ok: true };
+  }
+
+  // A tab without window focus may dispatch no native focus events. Match
+  // normal focus ordering so reactive auth forms commit their entered values.
+  function focusOn(el) {
+    const silent = !document.hasFocus();
     el.focus();
+    if (silent) for (const type of ['focus', 'focusin'])
+      el.dispatchEvent(new FocusEvent(type, { bubbles: type === 'focusin', composed: true }));
+  }
+
+  function leave(el) {
+    const silent = !document.hasFocus();
+    el.blur();
+    if (silent) for (const type of ['blur', 'focusout'])
+      el.dispatchEvent(new FocusEvent(type, { bubbles: type === 'focusout', composed: true }));
+  }
+
+  function setValue(el, value) {
+    focusOn(el);
     el.value = value;
     el.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, inputType: 'insertText' }));
     el.dispatchEvent(new Event('change', { bubbles: true }));
-    el.blur();
+    leave(el);
   }
 
   const BUTTONS = 'button, input[type=submit], input[type=button], input[type=image], [role=button], a[role=button]';
@@ -185,17 +420,114 @@
   const INTENT = {
     login: { good: /sign ?in|log ?in|continue|next|submit|verify|confirm|go\b/i, bad: /sign ?up|create|register|join/i },
     signup: { good: /create|sign ?up|register|join|continue|next|submit|get started|agree|verify|confirm/i, bad: /sign ?in|log ?in/i },
-    code: { good: /verify|confirm|continue|next|submit|done|sign ?in|log ?in/i, bad: /resend|send again|new code|different/i },
+    code: { good: /verify|confirm|continue|next|submit|done|sign ?in|log ?in/i, bad: /resend|send again|new (?:pass ?)?code|different/i },
   };
+
+  // A sign-in block that shares one page-wide form with a sign-up block, as on
+  // ASP.NET portals (a "Returning User" block beside "New Applicant"): the
+  // nearest ancestor of a lone password that holds one identifier and its own
+  // button, said to be for returning users or signing in, and stopping before
+  // it takes in a second identifier or password.
+  const RETURNING_SECTION = /\b(?:returning|existing) (?:user|applicant|candidate|member|customer)s?\b/i;
+  const SIGN_IN_SECTION = /\bsign ?in\b|\blog ?in\b/i;
+  const SIGNUP_SECTION = /\bsign ?up\b|\bregister\b|create (?:an |a |your )?(?:new )?(?:account|profile)|\bnew (?:user|applicant|candidate|member|customer)s?\b/i;
+
+  // Shadow trees compare as disconnected, so a button inside one stands at its host's place.
+  function follows(field, el) {
+    while (treeRoot(el) && treeRoot(el) !== treeRoot(field)) el = treeRoot(el).host;
+    return !!(field.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING);
+  }
+
+  // A flat page's section also holds its header link and search submit, so what follows the password comes first.
+  function sectionButton(pw, buttons) {
+    const { good } = INTENT.login;
+    const pick = list => list.find(b => b.type === 'submit') || list.find(b => good.test(buttonLabel(b))) || (list.length === 1 ? list[0] : null);
+    return pick(buttons.filter(b => follows(pw, b))) || pick(buttons);
+  }
+
+  // The heading may be any element in or above the form, so read back from the password:
+  // the first heading or sign-up wording decides, and only a short line counts as one.
+  function underReturningHeading(pw) {
+    const walker = document.createTreeWalker(document, NodeFilter.SHOW_TEXT);
+    walker.currentNode = pw;
+    for (let lines = 0; lines < 12 && walker.previousNode(); ) {
+      const holder = walker.currentNode.parentElement;
+      const text = textOf(walker.currentNode);
+      if (!text || !visible(holder)) continue;
+      lines++;
+      if (SIGNUP_SECTION.test(text)) return false;
+      if (RETURNING_SECTION.test(text)) return text.length <= 60;
+      if (holder.closest('h1, h2, h3, h4, h5, h6, legend, [role=heading]')) return false;
+    }
+    return false;
+  }
+
+  // Njoyn gives returning users a form of their own, and its submit says "Apply": the one
+  // place that word signs in. The form asks for an identifier and this password, nothing else.
+  function returningForm(pw) {
+    if (!pw.form) return null;
+    const controls = deepAll('input, button').filter(el => el.form === pw.form && visible(el));
+    const kinds = controls.map(kindOf).filter(Boolean);
+    if (kinds.length !== 2 || !kinds.some(x => x.kind === 'email' || x.kind === 'username') || !underReturningHeading(pw)) return null;
+    const { bad } = INTENT.login;
+    const button = sectionButton(pw, controls.filter(el => {
+      const label = buttonLabel(el);
+      return el.matches(BUTTONS) && !el.disabled && !ELSEWHERE.test(label) && !bad.test(label) && (/^apply$/i.test(label) || !NON_AUTH_ACTION.test(label));
+    }));
+    return button ? { node: pw.form, button } : null;
+  }
+
+  function loginSection(pw) {
+    const k = pw && kindOf(pw);
+    if (k?.kind !== 'password' || k.confirm) return null;
+    // Only an autocomplete hint can be overruled; a label asking for a new password means what it says.
+    if (/new|create|choose|set up/.test(labelText(pw).toLowerCase().replace(/new-password/g, ''))) return null;
+    return sharedSection(pw, k) || returningForm(pw);
+  }
+
+  function sharedSection(pw, k) {
+    const { bad } = INTENT.login;
+    let near = null; // the button belongs to the nearest level that has one, not to wherever the wording is
+    for (let node = pw.parentElement; node && node !== document.documentElement; node = node.parentElement) {
+      const kinds = deepAll('input', node).filter(visible).map(kindOf).filter(Boolean);
+      if (kinds.filter(x => x.kind === 'password').length > 1) return null;
+      const ids = kinds.filter(x => x.kind === 'email' || x.kind === 'username').length;
+      if (ids > 1) return null;
+      const buttons = deepAll(`${BUTTONS}, a[href]`, node).filter(el => {
+        const label = buttonLabel(el);
+        if (!visible(el) || el.disabled || ELSEWHERE.test(label) || bad.test(label) || NON_AUTH_ACTION.test(label)) return false;
+        if (el.tagName === 'A' && !el.matches('[role=button]')) return /^(?:sign|log) ?in$/i.test(label);
+        return !pw.form || !['BUTTON', 'INPUT'].includes(el.tagName) || el.form === pw.form;
+      });
+      if (ids !== 1 || !buttons.length) continue;
+      near ||= buttons;
+      const inputLabels = deepAll('input[type=submit], input[type=button]', node).map(el => el.value).join(' ');
+      if (SIGNUP_SECTION.test(`${deepText(node, 4000)} ${inputLabels}`)) return null;
+      let words = deepText(node, 4000).replace(/\s+/g, ' ');
+      for (const el of deepAll(`${BUTTONS}, a[href]`, node)) {
+        const label = textOf(el);
+        if (label) words = words.replace(label, ' ');
+      }
+      // Sign-up forms ask for a new password and say "sign in" too; only returning-user wording overrules the hint.
+      if (!RETURNING_SECTION.test(words) && (k.isNew || !SIGN_IN_SECTION.test(words))) continue;
+      const button = sectionButton(pw, near);
+      return button ? { node, button } : null;
+    }
+    return null;
+  }
 
   function findSubmit(anchor, purpose) {
     const { good, bad } = INTENT[purpose] || INTENT.login;
+    if (purpose === 'login') {
+      const section = loginSection(anchor);
+      if (section) return section.button;
+    }
     const label = buttonLabel;
     const usable = el => visible(el) && !el.disabled && !ELSEWHERE.test(label(el)) && !bad.test(label(el)) && !NON_AUTH_ACTION.test(label(el));
     // An unrelated header login must never be used to submit a different form.
-    const scopes = anchor?.form ? [anchor.form] : [anchor?.closest('[role=dialog], [role=form], section, main') || document];
+    const scopes = [anchor?.form || scopeOf(anchor)];
     for (const scope of scopes) {
-      const buttons = [...scope.querySelectorAll(BUTTONS)].filter(usable);
+      const buttons = deepAll(BUTTONS, scope).filter(usable);
       const typed = buttons.find(b => b.type === 'submit' && (anchor?.form ? b.form === anchor.form : true));
       if (typed) return typed;
       const named = buttons.find(b => good.test(label(b)));
@@ -204,17 +536,33 @@
     return null;
   }
 
+  // A shadow root holding buttons is its own scope; one that wraps only an
+  // input defers to the host's surroundings.
+  function scopeOf(anchor) {
+    for (let node = anchor; node; ) {
+      const hit = node.closest?.(node === anchor ? CONTAINER : `form, ${CONTAINER}`);
+      if (hit) return hit;
+      const root = treeRoot(node);
+      if (!root) return document;
+      if (deepAll(BUTTONS, root).some(visible)) return root;
+      node = root.host;
+    }
+    return document;
+  }
+
   function authIntents(fields) {
     const passwords = fields.filter(f => f.kind === 'password');
     const first = passwords[0] || fields.find(f => ['email', 'username'].includes(f.kind));
     const anchor = first && byRef(first.ref);
     if (!anchor) return { login: false, signup: false };
-    const scope = anchor.form || anchor.closest('[role=dialog], [role=form], section, main') || document;
+    // CGI marks its returning-user password new-password; the section decides.
+    if (passwords.length === 1 && loginSection(anchor)) return { login: true, signup: false };
+    const scope = anchor.form || scopeOf(anchor);
     const buttonText = purpose => {
       const button = findSubmit(anchor, purpose);
       return button ? buttonLabel(button) : '';
     };
-    const heads = [document.title, ...[...(scope.closest?.('main, section, [role=dialog]') || document).querySelectorAll('h1,h2,h3')]
+    const heads = [document.title, ...deepAll('h1,h2,h3', scope.closest?.('main, section, [role=dialog]') || document)
       .filter(visible).map(textOf), (location.pathname + location.hash).replace(/[-_/#]+/g, ' ')].join(' ');
     const loginButton = buttonText('login');
     const signupButton = buttonText('signup');
@@ -235,7 +583,7 @@
     const r = el.getBoundingClientRect();
     const x = r.left + r.width / 2;
     const y = r.top + r.height / 2;
-    const hit = document.elementFromPoint(x, y);
+    const hit = lookupRoot(el).elementFromPoint(x, y);
     const covered = hit && hit !== el && !el.contains(hit) && !hit.contains(el)
       && (hit.closest('[role=button]') || el.parentElement?.parentElement?.contains(hit));
     const target = covered ? hit : el;
@@ -247,13 +595,14 @@
     target.click();
   }
 
+  // Submit events do not cross shadow boundaries, so listen on the form and its root too.
   function submit(anchor, purpose) {
-    let fired = false;
-    let native = false;
-    const onSubmit = e => { fired = true; native = !e.defaultPrevented; };
-    addEventListener('submit', onSubmit);
+    let event = null;
+    const onSubmit = e => { event = e; };
+    const targets = [...new Set([globalThis, anchor?.form, treeRoot(anchor)].filter(Boolean))];
+    for (const target of targets) target.addEventListener('submit', onSubmit);
     try {
-      const button = findSubmit(anchor, purpose);
+      const button = scan(() => findSubmit(anchor, purpose));
       if (button) press(button);
       else if (anchor?.form) anchor.form.requestSubmit();
       else if (anchor) {
@@ -261,15 +610,26 @@
           anchor.dispatchEvent(new KeyboardEvent(type, { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
         }
       }
-      return { clicked: !!button, native: fired && native };
+      return { clicked: !!button, native: !!event && !event.defaultPrevented };
     } finally {
-      removeEventListener('submit', onSubmit);
+      for (const target of targets) target.removeEventListener('submit', onSubmit);
     }
   }
 
+  // Regional variants of a form (EA's Chinese and Korean fields) stay in the DOM, hidden but required.
+  // Only fields the user could see and fill count as missing.
+  function shown(el) {
+    if (visible(el) || visible(el.closest('label'))) return true;
+    const label = el.id && document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
+    return !!label && visible(label);
+  }
+
+  function invalidFields(form, ours) {
+    return [...form.elements].filter(el => el.willValidate && !el.checkValidity() && !ours.has(el) && shown(el));
+  }
+
   function invalidLabels(form, ours) {
-    return [...form.elements]
-      .filter(el => el.willValidate && !el.checkValidity() && !ours.has(el))
+    return invalidFields(form, ours)
       .map(el => labelText(el).split(' ').slice(0, 6).join(' ') || el.name || el.type)
       .slice(0, 10);
   }
@@ -281,6 +641,10 @@
     if (['login', 'signup'].includes(purpose) && !inspect().auth[purpose]) {
       return { ok: false, noForm: true };
     }
+    // The sign-up block sharing a sign-in section's form keeps its own email field empty.
+    const section = purpose === 'login' && scan(() => loginSection(byRef(submitRef)))?.node;
+    // A form can own fields outside itself, as when the parser lifts it out of a table.
+    if (section) fills = fills.filter(f => deepContains(section, byRef(f.ref)) || byRef(f.ref)?.form === section);
     const ours = new Set();
     for (const f of fills) {
       const el = byRef(f.ref);
@@ -291,8 +655,8 @@
     }
     const anchor = byRef(submitRef);
     if (!anchor) return { ok: true, submitted: false };
-    if (validate && anchor.form && !anchor.form.checkValidity()) {
-      const ownInvalid = [...ours].some(el => !el.checkValidity());
+    const ownInvalid = validate && anchor.form && [...ours].some(el => !el.checkValidity());
+    if (validate && anchor.form && (ownInvalid || invalidFields(anchor.form, ours).length)) {
       const missing = invalidLabels(anchor.form, ours);
       clearFilled(true);
       return { ok: false, ownInvalid, missing };
@@ -343,5 +707,5 @@
     return false;
   }
 
-  globalThis.__latch = { inspect, fillAndSubmit, fillCode, fillOne, clearFilled, secretsLeft };
+  globalThis.__latch = { inspect, fillAndSubmit, fillCode, fillOne, clearFilled, secretsLeft, requestRecovery, fillReset };
 })();

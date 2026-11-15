@@ -1,9 +1,12 @@
-// Reads verification emails over IMAP. Only codes and links leave this module,
-// and only back to the extension; nothing here is sent to the AI.
+// Reads verification and password reset emails over IMAP. Only codes and links
+// leave this module, and only back to the extension; nothing here is sent to the AI.
+// Verify searches never return reset links. Reset links are looked up only when the
+// user clicks Open reset email in the popup, and the extension opens them itself.
 import { createHash } from 'node:crypto';
 import { Resolver, resolveMx, resolveTxt } from 'node:dns/promises';
 import { ImapFlow } from 'imapflow';
 import { simpleParser } from 'mailparser';
+import { resetLinkAllowed } from '../extension/domains.js';
 
 const TWO_PART_TLDS = new Set([
   'co.uk', 'org.uk', 'ac.uk', 'gov.uk', 'com.au', 'net.au', 'org.au', 'co.nz', 'co.jp', 'co.in',
@@ -32,6 +35,11 @@ function siteLabels(host) {
 
 const SUBJECT_HINT = /verif|confirm|code|activat|welcome|sign|log ?in|one[- ]time|otp|passcode|security|account/i;
 const LINK_GOOD = /verif|confirm|activat|validat|magic|sign.?in|log.?in|complete|get started|finish/i;
+const WORDS = "(?:[\\w'’-]+ ){0,3}?";
+export const RESET_SUBJECT = new RegExp(`reset ${WORDS}password|password (?:reset|recovery|change|assistance)\\b|account recovery|forgot (?:your )?password|recover ${WORDS}(?:password|account)|change ${WORDS}password|new password`, 'i');
+export const RESET_LINK = /reset|forgot|recover|(?:change|new|set).?password/i;
+// A message about resetting, not the bare "Forgot your password?" of a footer.
+const RESET_BODY = /\b(?:request(?:ed)?|asked|click|tap|use|follow)\b[^.\n]{0,60}\b(?:reset|recover|change|choose|set)\b[^.\n]{0,40}\bpassword\b|\bpassword (?:reset|recovery) (?:link|request)\b/i;
 const LINK_BAD = /unsubscribe|privacy|terms|help|support|preferences|manage|facebook\.com|twitter\.com|x\.com\/|instagram|youtube|linkedin\.com\/company|mailto:|tel:|app store|google play|apps\.apple|play\.google/i;
 
 function imapClient(imap) {
@@ -127,8 +135,9 @@ function allowedScheme(href) {
   }
 }
 
-export function extractLink({ html, text }, siteHost) {
-  const site = baseDomain(siteHost);
+const purposeOf = req => (req?.purpose === 'reset' ? 'reset' : 'verify');
+
+function mailLinks({ html, text }) {
   const links = [];
   if (html) {
     for (const m of html.matchAll(/<a\b[^>]*?href\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi)) {
@@ -141,9 +150,37 @@ export function extractLink({ html, text }, siteHost) {
       links.push({ href: m[0], label: line.split('\n').pop() });
     }
   }
+  return links;
+}
+
+const badLink = link => LINK_BAD.test(link.href) || LINK_BAD.test(link.label);
+const resetLink = link => RESET_LINK.test(link.href) || RESET_LINK.test(link.label);
+
+// A reset link must be https on the site's base domain, and on its own tenant for a job
+// portal. Without a reset subject the link itself has to say reset; with one, any
+// same-site link other than the home page.
+function extractResetLink(body, siteHost) {
+  const exact = String(siteHost || '').toLowerCase();
+  const resetSubject = RESET_SUBJECT.test(body.subject || '');
   let best = null;
-  for (const link of links) {
-    if (!allowedScheme(link.href) || LINK_BAD.test(link.href) || LINK_BAD.test(link.label)) continue;
+  for (const link of mailLinks(body)) {
+    let u;
+    try { u = new URL(link.href); } catch { continue; }
+    if (u.protocol !== 'https:' || u.username || u.password || !resetLinkAllowed(u.hostname, exact) || badLink(link)) continue;
+    const named = resetLink(link);
+    if (!named && !(resetSubject && u.pathname + u.search !== '/')) continue;
+    const score = (named ? 4 : 0) + (u.hostname === exact ? 2 : 0) + (u.search || u.pathname.length > 24 ? 1 : 0);
+    if (!best || score > best.score) best = { href: link.href, score };
+  }
+  return best?.href ?? null;
+}
+
+export function extractLink(body, siteHost, purpose = 'verify') {
+  if (purpose === 'reset') return extractResetLink(body, siteHost);
+  const site = baseDomain(siteHost);
+  let best = null;
+  for (const link of mailLinks(body)) {
+    if (!allowedScheme(link.href) || badLink(link) || resetLink(link)) continue;
     let score = 0;
     if (baseDomain(hostOf(link.href)) === site) score += 3;
     if (LINK_GOOD.test(link.label) || LINK_GOOD.test(new URL(link.href).pathname + new URL(link.href).search)) score += 2;
@@ -169,23 +206,42 @@ export function extractCode({ subject, text }) {
   return lone.length === 1 ? lone[0][1] : null;
 }
 
-function headerScore(parsed, site, labels) {
+// Header-only score; 0 means the body is never fetched.
+export function headerScore(parsed, siteHost, purpose = 'verify') {
+  const site = baseDomain(siteHost);
   const from = parsed.from?.value?.[0] || {};
   const fromHost = String(from.address || '').split('@')[1] || '';
   const subject = parsed.subject || '';
+  if (purpose !== 'reset' && RESET_SUBJECT.test(subject)) return 0;
   const haystack = `${from.name || ''} ${from.address || ''} ${subject}`.toLowerCase();
   let score = 0;
   if (baseDomain(fromHost) === site) score += 3;
-  if (labels.some(l => haystack.includes(l))) score += 2;
+  if (siteLabels(String(siteHost || '').toLowerCase()).some(l => haystack.includes(l))) score += 2;
   if (SUBJECT_HINT.test(subject)) score += 1;
+  if (purpose === 'reset' && RESET_SUBJECT.test(subject)) score += 2;
   return score;
+}
+
+// What a fetched message yields: { found: { code } | { link }, bonus } or null.
+// Reset searches never return a code.
+export function judgeMessage(body, siteHost, { purpose, expect } = {}) {
+  const site = baseDomain(siteHost);
+  if (purpose === 'reset') {
+    const link = extractResetLink(body, siteHost);
+    return link ? { found: { link }, bonus: hostOf(link) === String(siteHost || '').toLowerCase() ? 5 : 3 } : null;
+  }
+  if (RESET_SUBJECT.test(body.subject || '')) return null;
+  const link = RESET_BODY.test(body.text || '') ? null : extractLink(body, siteHost);
+  const bonus = link && baseDomain(hostOf(link)) === site ? 3 : 0;
+  const code = expect === 'link' ? null : extractCode(body);
+  const found = code ? { code } : link && expect !== 'code-only' ? { link } : null;
+  return found ? { found, bonus } : null;
 }
 
 async function scanFolder(client, folder, req) {
   const lock = await client.getMailboxLock(folder, { readOnly: true });
   try {
-    const site = baseDomain(req.site.host);
-    const labels = siteLabels(req.site.host);
+    const purpose = purposeOf(req);
     const since = Number(req.since) || Date.now() - 15 * 60e3;
     const exclude = new Set(req.exclude || []);
     const uids = await client.search({ since: new Date(since - 24 * 3600e3) }, { uid: true });
@@ -198,7 +254,7 @@ async function scanFolder(client, folder, req) {
       const parsed = await simpleParser(msg.headers);
       const key = messageKey(parsed.messageId || `${folder}:${msg.uid}:${at}`);
       if (exclude.has(key)) continue;
-      const score = headerScore(parsed, site, labels);
+      const score = headerScore(parsed, req.site.host, purpose);
       if (score >= 1) heads.push({ uid: msg.uid, at, key, score });
     }
     heads.sort((a, b) => b.score - a.score || b.at - a.at);
@@ -208,14 +264,11 @@ async function scanFolder(client, folder, req) {
       if (!msg?.source) continue;
       const parsed = await simpleParser(msg.source);
       const body = { subject: parsed.subject || '', text: parsed.text || stripTags(parsed.html || ''), html: parsed.html || '' };
-      const link = extractLink(body, req.site.host);
-      let score = head.score;
-      if (link && baseDomain(hostOf(link)) === site) score += 3;
+      const hit = judgeMessage(body, req.site.host, { purpose, expect: req.expect });
+      if (!hit) continue;
+      const score = head.score + hit.bonus;
       if (score < 3) continue;
-      const code = req.expect === 'link' ? null : extractCode(body);
-      const found = code ? { code } : link && req.expect !== 'code-only' ? { link } : null;
-      if (!found) continue;
-      if (!best || score > best.score || (score === best.score && head.at > best.at)) best = { ...found, key: head.key, score, at: head.at };
+      if (!best || score > best.score || (score === best.score && head.at > best.at)) best = { ...hit.found, key: head.key, score, at: head.at };
     }
     return best;
   } finally {
@@ -233,6 +286,7 @@ export async function findVerification(req) {
     for (;;) {
       for (const folder of folders) {
         const hit = await scanFolder(client, folder, req);
+        if (hit && purposeOf(req) === 'reset') return { found: true, link: hit.link, key: hit.key };
         if (hit) return { found: true, code: hit.code, link: hit.link, key: hit.key };
       }
       if (Date.now() + 3000 > deadline) return { found: false };

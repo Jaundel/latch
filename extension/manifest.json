@@ -28,6 +28,7 @@
     "storage",
     "scripting",
     "tabs",
+    "tabGroups",
     "alarms",
     "favicon"
   ],

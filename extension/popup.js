@@ -1,5 +1,7 @@
 const view = document.getElementById('view');
 const conn = document.getElementById('conn');
+// Lives outside the view: a live region only speaks when it changes, and every render replaces the view.
+const announce = document.getElementById('announce');
 
 const call = (type, data = {}) => chrome.runtime.sendMessage({ type, ...data });
 
@@ -9,6 +11,9 @@ let onboarding = false;
 let revealed = {};     // host -> password, popup memory only
 let page = null;       // what the active tab offers: { kind, host, saved }
 let tabRun = null;     // { busy } or the result of running Latch on the active tab
+let resetFill = null;  // { busy } or the fillReset result for the active tab
+const resetBusy = new Set();  // hosts whose reset rows are working
+let resetNote = null;  // { text, tone } from the last reset row action
 let allSites = false;
 
 function h(tag, attrs = {}, ...children) {
@@ -89,6 +94,7 @@ const steps = n => h('p', { class: 'step' }, `Step ${n} of 3`);
 const NEEDS = {
   captcha: 'Needs you: CAPTCHA', phone_code: 'Needs you: phone code', authenticator_code: 'Needs you: authenticator code',
   passkey: 'Needs you: passkey', push_approval: 'Needs you: approve on your phone', locked: 'Account locked', mailbox: 'Needs your inbox',
+  recovery_pending: 'Needs you: finish the password reset',
 };
 
 function outcome(a) {
@@ -255,23 +261,57 @@ const PAGE = {
   sign_up: { title: 'Sign-up page', sub: () => 'Latch will create the account with a new strong password.', tool: 'create_account', action: 'Create account' },
   code: { title: 'Asking for a code', sub: () => (state.mailbox ? 'Latch can read it from your inbox.' : 'Connect your inbox and Latch can enter it.'), tool: 'verify_email', action: 'Enter code' },
   check_email: { title: 'Waiting on an email link', sub: () => (state.mailbox ? 'Latch can open it from your inbox.' : 'Your AI can open it from your webmail.'), tool: 'verify_email', action: 'Verify email' },
+  reset: { title: p => `Password reset page for ${p.host}`, sub: () => 'Latch fills both new password fields with your main password. You press the page\'s button to save it.', fill: true },
   captcha: { title: 'CAPTCHA on this page', sub: () => 'Solve it in the page, then let your AI carry on.' },
   signed_in: { title: 'Signed in', sub: () => 'Nothing for Latch to do here.' },
   none: { title: 'Nothing to sign in to', sub: () => 'Latch steps in when a page asks for an account.' },
   blank: { title: 'Open a website', sub: () => 'Latch works on the page in front of you.' },
 };
 
+const RESET_FILL_FAILED = {
+  password_policy: 'This site\'s password rules do not accept your main password.',
+};
+
+function fillResetButton() {
+  return h('button', {
+    class: 'btn primary block', type: 'button', disabled: !!resetFill?.busy || state.settings.paused,
+    onclick: async () => {
+      resetFill = { busy: true };
+      announce.textContent = 'Filling your main password…';
+      render();
+      resetFill = (await call('fillReset').catch(() => null)) || { ok: false };
+      announce.textContent = fillResetText();
+      await refresh();
+      render();
+    },
+  }, resetFill?.busy ? 'Filling…' : 'Use my main password');
+}
+
+function fillResetText() {
+  return resetFill.ok
+    ? resetFill.message || 'Filled your main password. Press the page\'s button to save it.'
+    : resetFill.message || RESET_FILL_FAILED[resetFill.reason] || 'Latch could not fill this page.';
+}
+
+function fillResetNotice() {
+  if (!resetFill || resetFill.busy) return null;
+  return h('p', { class: `notice ${resetFill.ok ? 'good' : 'bad'}` }, fillResetText());
+}
+
 function pageCard() {
   if (!page) return h('section', { class: 'page loading', 'aria-busy': 'true' }, h('div', { class: 'page-title' }, 'Reading this page…'));
   const info = PAGE[page.kind] || PAGE.none;
   const result = tabRun && !tabRun.busy ? outcome(tabRun) : null;
+  const titled = typeof info.title === 'function';
   return h('section', { class: 'page', 'aria-label': 'This page' },
     h('div', { class: 'page-head' },
       page.host ? favicon(page.host, 'page') : null,
       h('div', { style: 'min-width:0' },
-        page.host ? h('div', { class: 'page-host', title: page.host }, page.host) : null,
-        h('div', { class: 'page-title' }, info.title))),
+        page.host && !titled ? h('div', { class: 'page-host', title: page.host }, page.host) : null,
+        h('div', { class: 'page-title' }, titled ? info.title(page) : info.title))),
     h('p', { class: 'page-sub' }, info.sub(page)),
+    info.fill ? fillResetButton() : null,
+    info.fill ? fillResetNotice() : null,
     info.tool ? h('button', {
       class: 'btn primary block', type: 'button', disabled: !!tabRun?.busy || state.settings.paused,
       onclick: async () => {
@@ -294,6 +334,68 @@ function activityRow(a) {
     h('div', { style: 'min-width:0' },
       h('div', { class: 'name' }, o.text),
       h('div', { class: 'sub' }, [a.site, clientName(a.client), ago(a.at)].filter(Boolean).join(' · '))));
+}
+
+const MAIL_ERRORS = {
+  offline: 'Latch reads your inbox while your AI is connected. Connect it, or open the reset email from your webmail.',
+  auth: 'Your inbox app password was not accepted. Update it in Settings.',
+};
+
+function resetNotice(type, r, host) {
+  if (type === 'dismissReset') return r.ok === false ? { text: 'Could not dismiss that reset.', tone: 'bad' } : null;
+  if (r.ok) return { text: `Opened the reset link for ${host} in a new tab. Open Latch on that page and choose Use my main password.`, tone: 'good' };
+  if (r.reason === 'no_inbox') return { text: 'Connect your inbox first, or open the reset email from your webmail.', tone: 'bad' };
+  if (r.reason === 'not_found') return { text: `Latch did not find an unused reset email with a link to ${host}. If it has arrived, open it from your webmail.`, tone: '' };
+  if (r.reason === 'link_rejected') return { text: `The reset email's link does not go to ${host}, so Latch did not open it. Check the email in your webmail.`, tone: 'bad' };
+  if (r.reason === 'mail_error') return { text: MAIL_ERRORS[r.error] || 'Could not reach your inbox. Try again shortly.', tone: 'bad' };
+  if (r.reason === 'busy') return { text: `Latch is still looking for the reset email from ${host}.`, tone: '' };
+  return { text: r.message || 'Could not open the reset email.', tone: 'bad' };
+}
+
+async function resetAction(type, host) {
+  if (resetBusy.has(host)) return;
+  resetBusy.add(host);
+  resetNote = null;
+  announce.textContent = type === 'openResetLink' ? `Looking for the reset email from ${host}…` : `Dismissing the reset for ${host}…`;
+  render();
+  const r = (await call(type, { host }).catch(() => null)) || {};
+  resetBusy.delete(host);
+  resetNote = resetNotice(type, r, host);
+  announce.textContent = resetNote?.text || `Dismissed the reset for ${host}.`;
+  await refresh();
+  render();
+}
+
+function resetRow(r) {
+  const busy = resetBusy.has(r.host);
+  const when = r.requestedAt
+    ? [`Requested ${ago(r.requestedAt)}`, r.openedAt ? `opened ${ago(r.openedAt)}` : null].filter(Boolean).join(' · ')
+    : r.resetAt ? `Filled ${ago(r.resetAt)}` : 'Reset in progress';
+  return h('li', { class: 'row reset' },
+    favicon(r.host, 'reset'),
+    h('div', { style: 'min-width:0' },
+      h('div', { class: 'name', title: r.host }, r.host),
+      h('div', { class: 'sub' }, when)),
+    r.pendingMain ? h('div', { class: 'note' }, 'Saved? Latch will use your main password next sign-in') : null,
+    h('div', { class: 'row-buttons' },
+      h('button', {
+        class: 'btn small', type: 'button', disabled: busy, 'aria-label': `Open reset email for ${r.host}`,
+        onclick: () => resetAction('openResetLink', r.host),
+      }, busy ? 'Working…' : 'Open reset email'),
+      h('button', {
+        class: 'row-action', type: 'button', disabled: busy, 'aria-label': `Dismiss reset for ${r.host}`,
+        onclick: () => resetAction('dismissReset', r.host),
+      }, 'Dismiss')));
+}
+
+function resetsSection() {
+  const resets = state.resets || [];
+  if (!resets.length) return [];
+  return [
+    h('div', { class: 'section-head' }, h('h2', {}, 'Password resets'), h('span', {}, String(resets.length))),
+    h('ul', { class: 'list', 'aria-label': 'Password resets' }, resets.map(resetRow)),
+    ...(resetNote ? [h('p', { class: `notice ${resetNote.tone}` }, resetNote.text)] : []),
+  ];
 }
 
 function siteRow(site) {
@@ -347,6 +449,8 @@ function homeScreen() {
     parts.push(h('div', { class: 'banner' }, 'No AI is connected. ',
       h('button', { class: 'link inline', type: 'button', onclick: () => { onboarding = false; show('connect'); } }, 'Connect one')));
   }
+
+  parts.push(...resetsSection());
 
   if (s.activity.length) {
     parts.push(h('div', { class: 'section-head' }, h('h2', {}, 'Recent'),
@@ -422,8 +526,8 @@ function settingsScreen() {
       h('b', {}, 'New account passwords'),
       h('div', { class: 'segmented', role: 'group', 'aria-label': 'New account passwords' }, mode('unique'), mode('mine')),
       h('small', {}, s.settings.newPasswords === 'unique'
-        ? 'Each new account gets its own strong password. You can view them under Accounts.'
-        : 'New accounts use the password you saved in Latch.')),
+        ? 'Each new account gets its own strong password, shown under Accounts. Same as mine is recommended: sign-in tries your main password when a saved site password stops working.'
+        : 'Same as mine is recommended. New accounts use your main password, and sign-in tries it when a saved site password stops working.')),
     h('div', { class: 'setting' },
       h('div', { style: 'min-width:0' }, h('b', {}, 'AI connections'),
         h('small', {}, s.connected ? clients.join(', ') || 'Connected' : 'None connected')),

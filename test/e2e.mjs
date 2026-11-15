@@ -34,7 +34,10 @@ const ext = join(work, 'extension');
 cpSync(join(root, 'extension'), ext, { recursive: true });
 const sourceBuild = await fingerprint(name => Promise.resolve(readFileSync(join(ext, name), 'utf8')));
 const bgPath = join(ext, 'background.js');
-writeFileSync(bgPath, readFileSync(bgPath, 'utf8').replace('const PORT = 47801;', `const PORT = ${TEST_PORT};`));
+const bgSource = readFileSync(bgPath, 'utf8');
+const bgMoved = bgSource.replace('const PORT = 47801;', `const PORT = ${TEST_PORT};`);
+if (bgMoved === bgSource) throw new Error('background.js has no "const PORT = 47801;" line, so the test copy could reach the live bridge');
+writeFileSync(bgPath, bgMoved);
 
 const mailbox = new Mailbox();
 const imapStats = { logins: 0, failedLogins: 0, bodiesRead: 0 };
@@ -55,7 +58,7 @@ const mcp = new Client({ name: 'latch-e2e', version: '1.0.0' });
 await mcp.connect(transport);
 
 const { tools } = await mcp.listTools();
-check('MCP server lists the four tools', tools.map(t => t.name).sort().join() === 'create_account,fill_email,sign_in,verify_email', tools.map(t => t.name).join(' '));
+check('MCP server lists the seven tools', tools.map(t => t.name).sort().join() === 'application_page,create_account,fill_email,inspect_connection,request_password_recovery,sign_in,verify_email', tools.map(t => t.name).join(' '));
 
 const context = await chromium.launchPersistentContext(join(work, 'profile'), {
   channel: 'chromium',
