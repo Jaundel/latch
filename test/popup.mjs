@@ -1,156 +1,122 @@
+// The toolbar popup and the Latch page, rendered in Chrome against a stand-in for the extension API.
 import assert from 'node:assert/strict';
-import { test } from 'node:test';
+import { after, before, test } from 'node:test';
 import { readFileSync } from 'node:fs';
 import { chromium } from 'playwright';
 
-const SHELL = '<div id="conn"><span class="conn-text"></span></div><main id="view"></main><p id="announce" role="status" aria-live="polite"></p>';
+const read = name => readFileSync(new URL(`../extension/${name}`, import.meta.url), 'utf8');
+let browser;
+before(async () => { browser = await chromium.launch({ channel: 'chrome' }); });
+after(async () => { await browser?.close(); });
 
-test('account emblems stay loaded across popup renders without a load loop', async () => {
-  const browser = await chromium.launch({ channel: 'chrome' });
-  const page = await browser.newPage();
-  try {
-    await page.route('https://popup.test/**', route => route.fulfill({ contentType: 'image/svg+xml', body: '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><circle cx="8" cy="8" r="8" fill="blue"/></svg>' }));
-    await page.setContent(SHELL);
-    await page.evaluate(() => {
-      const state = { setup: true, email: 'fixture@example.test', connected: true, clients: [], mailbox: null,
-        settings: { paused: false, newPasswords: 'unique' }, activity: [],
-        sites: ['example.com', 'two.com', 'three.com', 'four.com', 'five.com'].map(host => ({ host, status: 'active', lastUsed: Date.now() })) };
-      window.chrome = { runtime: { getURL: path => 'https://popup.test' + path,
-        sendMessage: async ({ type }) => type === 'state' ? structuredClone(state) : type === 'pageState' ? { kind: 'none', host: 'example.com' } : {},
-        onMessage: { addListener() {} } } };
-      window.iconChanges = 0;
-      new MutationObserver(changes => {
-        window.iconChanges += changes.filter(change => change.target.matches?.('.fav')).length;
-      }).observe(document.getElementById('view'), { subtree: true, childList: true });
-    });
-    await page.addScriptTag({ type: 'module', content: readFileSync(new URL('../extension/popup.js', import.meta.url), 'utf8') });
-    await page.waitForFunction(() => document.querySelectorAll('.fav img').length === 5);
-    const before = await page.evaluate(() => { window.originalIcon = document.querySelector('.list .fav'); return iconChanges; });
-    await page.waitForTimeout(250);
-    const changes = await page.evaluate(before => iconChanges - before, before);
-    assert.equal(changes, 0, 'loaded images must not keep replacing themselves');
-    await page.getByRole('button', { name: 'Show all 5', exact: true }).click();
-    assert.equal(await page.evaluate(() => document.querySelector('.list .fav') === window.originalIcon), true,
-      'rerendering must retain the loaded account emblem instead of flashing a fallback letter');
-    assert.equal(await page.locator('.page .fav img').count(), 1, 'a page and account with the same host each keep their own emblem');
-    await page.waitForFunction(() => document.querySelectorAll('.list .fav img').length === 5, null, { timeout: 5000 });
-    assert.equal(await page.getByRole('heading', { name: 'Password resets' }).count(), 0, 'no resets section without resets');
-  } finally { await browser.close(); }
+// Serves the extension's pages from a fake origin, with chrome.runtime answered by `replies`.
+async function open(file, { state, replies = {}, viewport = { width: 360, height: 600 } }) {
+  const page = await browser.newPage({ viewport });
+  await page.route('https://ext.test/**', route => {
+    const name = new URL(route.request().url()).pathname.slice(1).split('?')[0];
+    if (name.startsWith('_favicon')) return route.fulfill({ status: 404, body: '' });
+    const type = name.endsWith('.css') ? 'text/css' : name.endsWith('.js') ? 'text/javascript' : 'text/html';
+    let body = read(name);
+    // The stand-in API has to exist before the page's own module runs.
+    if (name.endsWith('.html')) body = body.replace('<head>', '<head><script src="/stub.js"></script>');
+    return route.fulfill({ contentType: type, body });
+  });
+  await page.route('https://ext.test/stub.js', route => route.fulfill({ contentType: 'text/javascript', body: `
+    window.sent = [];
+    const state = ${JSON.stringify(state)};
+    const replies = { state: () => structuredClone(state), ${Object.entries(replies).map(([k, v]) => `${JSON.stringify(k)}: ${v}`).join(',')} };
+    window.chrome = {
+      runtime: { getURL: p => 'https://ext.test/' + p.replace(/^\\//, ''), getManifest: () => ({ version: '1.0.0' }),
+        sendMessage: async msg => { window.sent.push(msg); return replies[msg.type] ? replies[msg.type](msg) : {}; },
+        onMessage: { addListener() {} }, connect: () => ({ postMessage() {} }) },
+      tabs: { create: o => { window.opened = o.url; } },
+      action: { getUserSettings: async () => ({ isOnToolbar: false }) },
+    };
+    window.close = () => { window.closed = true; };` }));
+  await page.goto(`https://ext.test/${file}`);
+  return page;
+}
+
+const SETUP = { setup: true, email: 'fixture@example.test', connected: false, clients: [], mailbox: null, version: '1.0.0',
+  settings: { paused: false, newPasswords: 'unique', confirmNewSites: true, bar: true, approvedSites: ['bank.test'] }, activity: [],
+  sites: [{ host: 'github.com', status: 'active', source: 'main', totp: true, totpVerified: true, lastUsed: Date.now() }], resets: [] };
+
+test('before setup the popup offers one button that opens setup', async () => {
+  const page = await open('popup.html', { state: { ...SETUP, setup: false, email: '', sites: [] } });
+  await page.getByRole('heading', { name: 'Let your AI sign in for you' }).waitFor();
+  await page.getByRole('button', { name: 'Set up Latch' }).click();
+  assert.match(await page.evaluate(() => window.opened), /app\.html#welcome$/);
+  await page.close();
 });
 
-test('reset page fill and the password resets list send popup-only messages', async () => {
-  const browser = await chromium.launch({ channel: 'chrome' });
-  const page = await browser.newPage();
-  try {
-    await page.setContent(SHELL);
-    await page.evaluate(() => {
-      const state = { setup: true, email: 'fixture@example.test', connected: true, clients: [], mailbox: { user: 'fixture@example.test', host: 'imap.example.test' },
-        settings: { paused: false, newPasswords: 'mine' }, activity: [], sites: [],
-        resets: [{ host: 'jobs.test', requestedAt: Date.now() - 5 * 60e3, openedAt: null, resetAt: null, pendingMain: false }] };
-      window.sent = [];
-      const replies = {
-        state: () => structuredClone(state),
-        pageState: () => ({ kind: 'reset', host: 'portal.test', saved: false, pendingReset: false }),
-        fillReset: () => {
-          state.resets.unshift({ host: 'portal.test', requestedAt: null, openedAt: null, resetAt: Date.now(), pendingMain: true });
-          return { ok: true, message: "Filled your main password. Press the page's button to save it." };
-        },
-        openResetLink: () => ({ ok: false, reason: 'not_found' }),
-        dismissReset: ({ host }) => { state.resets = state.resets.filter(r => r.host !== host); return { ok: true }; },
-      };
-      window.chrome = { runtime: { getURL: path => 'https://popup.test' + path,
-        sendMessage: async msg => {
-          if (!['state', 'pageState', 'connect'].includes(msg.type)) sent.push(msg);
-          return replies[msg.type]?.(msg) ?? {};
-        },
-        onMessage: { addListener() {} } } };
-    });
-    await page.addScriptTag({ type: 'module', content: readFileSync(new URL('../extension/popup.js', import.meta.url), 'utf8') });
-    await page.getByText('Password reset page for portal.test', { exact: true }).waitFor();
-
-    const rows = page.locator('ul[aria-label="Password resets"] > li');
-    assert.equal(await rows.count(), 1);
-    assert.match(await rows.first().innerText(), /jobs\.test[\s\S]*Requested 5m ago/);
-    assert.doesNotMatch(await rows.first().innerText(), /Saved\?/);
-
-    await page.getByRole('button', { name: 'Use my main password', exact: true }).click();
-    await page.locator('.page .notice').filter({ hasText: "Press the page's button to save it." }).waitFor();
-    assert.deepEqual(await page.evaluate(() => sent), [{ type: 'fillReset' }]);
-    assert.equal(await page.locator('#announce').innerText(), "Filled your main password. Press the page's button to save it.");
-    assert.equal(await page.locator('.page .notice').getAttribute('aria-live'), null, 'only the persistent region speaks');
-
-    assert.equal(await rows.count(), 2);
-    const portal = rows.filter({ hasText: 'portal.test' });
-    assert.match(await portal.innerText(), /Saved\? Latch will use your main password next sign-in/);
-    assert.match(await portal.innerText(), /Filled just now/);
-
-    await page.getByRole('button', { name: 'Open reset email for jobs.test', exact: true }).click();
-    await page.getByText('Latch did not find an unused reset email with a link to jobs.test. If it has arrived, open it from your webmail.').first().waitFor();
-    assert.deepEqual(await page.evaluate(() => sent.at(-1)), { type: 'openResetLink', host: 'jobs.test' });
-
-    await page.getByRole('button', { name: 'Dismiss reset for jobs.test', exact: true }).click();
-    await page.waitForFunction(() => document.querySelectorAll('ul[aria-label="Password resets"] > li').length === 1);
-    assert.deepEqual(await page.evaluate(() => sent.at(-1)), { type: 'dismissReset', host: 'jobs.test' });
-
-    await page.getByRole('button', { name: 'Dismiss reset for portal.test', exact: true }).click();
-    await page.getByRole('heading', { name: 'Password resets' }).waitFor({ state: 'detached' });
-
-    await page.getByRole('button', { name: 'Settings', exact: true }).click();
-    await page.getByText('Same as mine is recommended. New accounts use your main password, and sign-in tries it when a saved site password stops working.', { exact: true }).waitFor();
-  } finally { await browser.close(); }
+test('the popup reads the page in front and runs Latch there', async () => {
+  const page = await open('popup.html', { state: SETUP, replies: {
+    pageState: '() => ({ kind: "sign_in", host: "github.com", saved: false, totp: true })',
+    codes: '() => [{ host: "github.com", issuer: "GitHub", code: "123456", left: 12, period: 30, verified: true }]',
+    runHere: '() => ({ status: "signed_in", site: "github.com", message: "Signed in. Continue your task in this tab." })',
+  } });
+  await page.locator('.page-title', { hasText: 'Sign-in page' }).waitFor();
+  assert.equal(await page.locator('.twofa .code').textContent(), '123 456', '2FA code for the site is shown');
+  await page.getByRole('button', { name: 'Sign in with Latch' }).click();
+  await page.locator('.page .notice', { hasText: 'Signed in. Continue your task in this tab.' }).waitFor();
+  assert.ok((await page.evaluate(() => window.sent)).some(m => m.type === 'runHere' && m.tool === 'sign_in'));
+  await page.close();
 });
 
-test('reset rows keep their own pending state and results reach one persistent live region', async () => {
-  const browser = await chromium.launch({ channel: 'chrome' });
-  const page = await browser.newPage();
-  try {
-    await page.setContent(SHELL);
-    await page.evaluate(() => {
-      const state = { setup: true, email: 'fixture@example.test', connected: true, clients: [], mailbox: { user: 'fixture@example.test', host: 'imap.example.test' },
-        settings: { paused: false, newPasswords: 'mine' }, activity: [], sites: [],
-        resets: ['a.test', 'b.test'].map(host => ({ host, requestedAt: Date.now() - 60e3, openedAt: null, resetAt: null, pendingMain: false })) };
-      window.opens = [];
-      window.release = {};
-      window.live = document.getElementById('announce');
-      const replies = {
-        state: () => structuredClone(state),
-        pageState: () => ({ kind: 'none', host: '' }),
-        openResetLink: ({ host }) => { opens.push(host); return new Promise(resolve => { release[host] = resolve; }); },
-        dismissReset: ({ host }) => { state.resets = state.resets.filter(r => r.host !== host); return { ok: true }; },
-      };
-      window.chrome = { runtime: { getURL: path => 'https://popup.test' + path, sendMessage: async msg => replies[msg.type]?.(msg) ?? {}, onMessage: { addListener() {} } } };
-    });
-    await page.addScriptTag({ type: 'module', content: readFileSync(new URL('../extension/popup.js', import.meta.url), 'utf8') });
-    const open = host => page.getByRole('button', { name: `Open reset email for ${host}`, exact: true });
-    const announced = () => page.locator('#announce').innerText();
-    await open('a.test').click();
-    assert.equal(await announced(), 'Looking for the reset email from a.test…');
-    await open('b.test').click();
-    assert.equal(await open('a.test').isDisabled(), true, 'one row working does not free another');
-    await page.evaluate(() => release['b.test']({ ok: false, reason: 'link_rejected' }));
-    await page.getByText("The reset email's link does not go to b.test", { exact: false }).first().waitFor();
-    assert.equal(await open('a.test').isDisabled(), true, 'a.test is still waiting');
-    assert.equal(await open('a.test').innerText(), 'Working…');
-    assert.equal(await open('b.test').isDisabled(), false);
-    await page.evaluate(() => release['a.test']({ ok: true, tabId: 8 }));
-    await page.waitForFunction(() => document.getElementById('announce').textContent.startsWith('Opened the reset link for a.test'));
-    assert.equal(await open('a.test').isDisabled(), false);
-    assert.deepEqual(await page.evaluate(() => opens), ['a.test', 'b.test']);
-    assert.equal(await page.evaluate(() => live === document.getElementById('announce')), true, 'the live region survives renders');
-    assert.equal(await page.locator('#view [aria-live]').count(), 0, 'notices are not live regions of their own');
+test('welcome is one step: email and password', async () => {
+  const state = { ...SETUP, setup: false, email: '', sites: [] };
+  const page = await open('app.html#welcome', { state, viewport: { width: 1200, height: 800 }, replies: {
+    saveIdentity: '() => { state.setup = true; state.email = "new@example.test"; return { ok: true }; }',
+  } });
+  await page.getByRole('heading', { name: 'Let your AI sign in for you.' }).waitFor();
+  await page.getByRole('button', { name: 'Start using Latch' }).click();
+  await page.getByText('Enter the email address you sign in with.').waitFor();
+  await page.getByLabel('Email').fill('new@example.test');
+  await page.getByLabel('Password', { exact: true }).fill('Secret-pass-1');
+  await page.getByRole('button', { name: 'Start using Latch' }).click();
+  await page.getByRole('heading', { name: 'You\'re ready.' }).waitFor();
+  const saved = (await page.evaluate(() => window.sent)).find(m => m.type === 'saveIdentity');
+  assert.deepEqual(saved, { type: 'saveIdentity', email: 'new@example.test', password: 'Secret-pass-1' });
+  assert.equal(await page.getByLabel('Password', { exact: true }).count(), 0, 'the password field is gone once saved');
+  await page.getByText('Pin Latch to your toolbar.').waitFor();
+  await page.close();
+});
 
-    const cases = [
-      [{ ok: false, reason: 'mail_error', error: 'offline' }, 'Latch reads your inbox while your AI is connected. Connect it, or open the reset email from your webmail.'],
-      [{ ok: false, reason: 'mail_error', error: 'auth' }, 'Your inbox app password was not accepted. Update it in Settings.'],
-      [{ ok: false, reason: 'mail_error', error: 'connect' }, 'Could not reach your inbox. Try again shortly.'],
-      [{ ok: false, reason: 'mail_error', error: 'timeout' }, 'Could not reach your inbox. Try again shortly.'],
-      [{ ok: false, reason: 'not_found' }, 'Latch did not find an unused reset email with a link to a.test. If it has arrived, open it from your webmail.'],
-    ];
-    for (const [reply, text] of cases) {
-      await open('a.test').click();
-      await page.evaluate(reply => release['a.test'](reply), reply);
-      await page.waitForFunction(text => document.getElementById('announce').textContent === text, text);
-      await page.locator('#view .notice').filter({ hasText: text }).waitFor();
-    }
-  } finally { await browser.close(); }
+test('settings show approved sites and the safety switch', async () => {
+  const page = await open('app.html#settings', { state: SETUP, viewport: { width: 1200, height: 800 } });
+  await page.getByText('Ask before using my password on a new site').waitFor();
+  assert.equal(await page.getByRole('checkbox', { name: 'Ask before using my password on a new site' }).isChecked(), true);
+  await page.getByRole('button', { name: 'Remove bank.test' }).click();
+  const patch = (await page.evaluate(() => window.sent)).find(m => m.type === 'settings');
+  assert.deepEqual(patch.patch, { approvedSites: [] });
+  await page.close();
+});
+
+test('2FA keys can be added by hand, and bad keys are explained', async () => {
+  const page = await open('app.html#codes', { state: SETUP, viewport: { width: 1200, height: 800 }, replies: {
+    codes: '() => [{ host: "github.com", issuer: "GitHub", code: "654321", left: 20, period: 30, verified: true }]',
+    addTotp: 'm => (m.key.includes("not") ? { ok: false, reason: "key" } : { ok: true, host: "example.com" })',
+  } });
+  await page.getByText('654 321').waitFor();
+  await page.getByLabel('Site').fill('example.com');
+  await page.getByLabel('Setup key').fill('not a key');
+  await page.getByRole('button', { name: 'Save 2FA key' }).click();
+  await page.getByText(/does not look like a setup key/).waitFor();
+  await page.close();
+});
+
+test('the approval window names the site and starts on "Don\'t allow"', async () => {
+  const page = await open('approve.html#abc', { state: SETUP, viewport: { width: 440, height: 560 }, replies: {
+    'approval:get': '() => ({ host: "login.bank.test", base: "bank.test" })',
+    'approval:answer': '() => ({ ok: true })',
+  } });
+  await page.getByText('Sign in to this site with your password?').waitFor();
+  assert.equal(await page.locator('.site b').textContent(), 'bank.test');
+  assert.equal(await page.evaluate(() => document.activeElement.textContent), 'Don\'t allow');
+  assert.equal(await page.getByRole('button', { name: 'Allow', exact: true }).isDisabled(), true, 'Allow is briefly disabled');
+  await page.waitForTimeout(800);
+  await page.getByRole('button', { name: 'Allow', exact: true }).click();
+  const answer = (await page.evaluate(() => window.sent)).find(m => m.type === 'approval:answer');
+  assert.deepEqual(answer, { type: 'approval:answer', id: 'abc', answer: 'allow' });
+  await page.close();
 });

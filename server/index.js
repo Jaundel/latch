@@ -14,10 +14,14 @@ import { EXTENSION_ID, STORE_ID } from '../extension/id.js';
 import { fingerprint, BRIDGE_PROTOCOL } from '../extension/build.js';
 import { checkMailbox, findVerification, lookupProvider } from './mail.js';
 
-const VERSION = '0.1.0';
+const VERSION = '1.0.0';
 const PORT = Number(process.env.LATCH_PORT || 47801);
-// The unpacked copy and the Chrome Web Store copy have different IDs.
-const EXTENSION_ORIGINS = new Set([EXTENSION_ID, STORE_ID].filter(Boolean).map(id => `chrome-extension://${id}`));
+// The unpacked copy and the Chrome Web Store copy have different IDs. LATCH_EXTENSION_IDS adds others.
+const EXTRA_IDS = String(process.env.LATCH_EXTENSION_IDS || '').split(',').map(s => s.trim()).filter(id => /^[a-p]{32}$/.test(id));
+const EXTENSION_ORIGINS = new Set([EXTENSION_ID, STORE_ID, ...EXTRA_IDS].filter(Boolean).map(id => `chrome-extension://${id}`));
+// Only the unpacked copy runs files from this checkout, so only it is compared against them.
+// Store copies update through the store and need only a matching bridge protocol.
+const DEV_ORIGIN = `chrome-extension://${EXTENSION_ID}`;
 const log = msg => process.stderr.write(`latch: ${msg}\n`);
 
 const UNAVAILABLE = {
@@ -58,7 +62,7 @@ const Result = z.object({
     .map(key => [key, z.number().int().nonnegative()]))).optional(),
 });
 
-const TOOLS = new Set(['application_page', 'create_account', 'fill_email', 'inspect_connection', 'request_password_recovery', 'sign_in', 'verify_email']);
+const TOOLS = new Set(['application_page', 'create_account', 'fill_email', 'inspect_connection', 'request_password_recovery', 'set_new_password', 'setup_two_factor', 'sign_in', 'verify_email']);
 
 function checkedResult(tool, result) {
   const safe = (tool === 'application_page' ? ApplicationResult : Result).safeParse(result);
@@ -150,7 +154,7 @@ function onConnection(ws, req) {
     return;
   }
   // A reloaded extension's old socket closes with its worker, so connections are not replaced here.
-  extensions.set(ws, { ready: false, build: '', since: ++seq });
+  extensions.set(ws, { ready: false, build: '', since: ++seq, origin: String(req.headers.origin || '') });
   ws.on('message', data => onExtensionMessage(ws, data).catch(err => log(`extension message failed: ${err.code || err.name}`)));
   ws.on('close', () => {
     extensions.delete(ws);
@@ -244,10 +248,11 @@ function locate(ws, args) {
 // Stale browsers are asked as well: if one of them may hold the tab, the fix is a reload.
 async function look(args) {
   const build = await extensionBuild();
-  const isCurrent = e => e.build === build && e.protocol === BRIDGE_PROTOCOL;
+  const fresh = e => e.origin !== DEV_ORIGIN || e.build === build;
+  const isCurrent = e => fresh(e) && e.protocol === BRIDGE_PROTOCOL;
   const ready = [...extensions].filter(([, e]) => e.ready);
   const current = ready.filter(([, e]) => isCurrent(e));
-  const staleReason = e => (e.build === build ? 'unsupported_worker' : 'stale_worker');
+  const staleReason = e => (fresh(e) ? 'unsupported_worker' : 'stale_worker');
   const answers = targeted(args) && current.length ? await Promise.all(ready.map(async ([ws, e]) =>
     ({ ws, since: e.since, current: isCurrent(e), stale: staleReason(e), ...await locate(ws, args) }))) : [];
   const connections = { connected: extensions.size, ready: ready.length, current: current.length,
@@ -258,7 +263,7 @@ async function look(args) {
   let status = 'ready';
   let reason = 'connection_verified';
   if (!ready.length) [status, reason] = ['unavailable', 'no_ready_browser'];
-  else if (!current.length) [status, reason] = ['reload_required', ready.some(([, e]) => e.build === build) ? 'unsupported_worker' : 'stale_worker'];
+  else if (!current.length) [status, reason] = ['reload_required', ready.some(([, e]) => fresh(e)) ? 'unsupported_worker' : 'stale_worker'];
   else if (targeted(args) && !target.length && (holder || silent)) [status, reason] = ['reload_required', holder ? holder.stale : 'stale_browser_may_hold_target'];
   else if (targeted(args) && !target.length) {
     [status, reason] = ['tab_not_found', answers.some(a => a.current && a.replied) ? 'target_not_in_connected_browser' : 'no_target_lookup_reply'];
@@ -289,7 +294,7 @@ async function askStaleReload() {
   const since = Date.now() - (reloadAsked.get(build) || 0);
   if (since < 60000) return since < 20000;
   let asked = false;
-  for (const [ws, e] of extensions) if (e.ready && e.build !== build && send(ws, { type: 'reload', build })) asked = true;
+  for (const [ws, e] of extensions) if (e.ready && e.origin === DEV_ORIGIN && e.build !== build && send(ws, { type: 'reload', build })) asked = true;
   if (asked) { reloadAsked.set(build, Date.now()); log('asked an out-of-date extension to reload'); }
   return asked;
 }
@@ -459,7 +464,7 @@ server.registerTool('inspect_connection', {
 
 server.registerTool('request_password_recovery', {
   title: 'Request password recovery',
-  description: 'On the exact HTTPS tab already showing an explicit password recovery form, privately request recovery instructions for the active account saved on that exact host (on a job portal with no active saved account, the user\'s email). This never follows a recovery link, enters a code or changes a password. The user finishes the reset from the Latch popup; do not request again, and try sign_in on a later run. A page-side deadline is enforced; cancellation is best effort until delivered. If interrupted or timed out, inspect the page before any retry because the request may have been sent.',
+  description: 'Use when the user has forgotten a password. On the exact HTTPS tab already showing a "forgot password" form, privately enters the user\'s email (or the user name saved for that site) and asks the site for a reset email. Then open the reset link from the newest email from that site in the user\'s inbox and call set_new_password on the page it opens. Do not request again. If interrupted or timed out, inspect the page before any retry because the request may have been sent.',
   inputSchema: {
     url: z.string().url().max(65536).refine(value => { try { const u = new URL(value); return u.protocol === 'https:' && !u.username && !u.password; } catch { return false; } }),
     tabId: z.number().int().nonnegative().optional(),
@@ -470,10 +475,27 @@ server.registerTool('sign_in', {
   title: 'Sign in',
   description:
     'Sign the user in on the website open in a Chrome tab. Use it whenever a page asks the user to log in or a session has expired. ' +
-    'Latch fills the saved email and password privately, submits, enters email verification codes if the site asks, and returns the outcome. ' +
-    'You never see the email or password. Afterwards, continue with your normal browser tools.',
+    'Latch fills the saved email and password privately, submits, enters email verification codes and authenticator (2FA) codes if the site asks, and returns the outcome. ' +
+    'You never see the email, password or codes. Afterwards, continue with your normal browser tools.',
   inputSchema: tabArg,
 }, args => call('sign_in', args, 58000));
+
+server.registerTool('set_new_password', {
+  title: 'Set a new password',
+  description:
+    'On a password reset page (reached from a reset email link), Latch chooses a strong new password, enters it in both fields, submits, ' +
+    'and saves it for that site so later sign-ins use it. You never see the password. Use after request_password_recovery, or whenever a site makes the user choose a new password.',
+  inputSchema: tabArg,
+}, args => call('set_new_password', args, 58000));
+
+server.registerTool('setup_two_factor', {
+  title: 'Set up two-factor authentication',
+  description:
+    'On a site\'s authenticator-app 2FA setup page (the one showing a QR code or setup key), Latch reads and saves the key privately, ' +
+    'enters the confirmation code, and from then on fills that site\'s 2FA codes during sign_in and verify_email. ' +
+    'If the key is only in a QR code, keep the tab in front so Latch can read it. Ask the user to store any backup codes the site shows.',
+  inputSchema: tabArg,
+}, args => call('setup_two_factor', args, 58000));
 
 server.registerTool('create_account', {
   title: 'Create account',

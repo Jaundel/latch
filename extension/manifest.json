@@ -1,8 +1,9 @@
 {
   "manifest_version": 3,
-  "name": "Latch",
-  "version": "0.1.0",
-  "description": "Lets your AI sign in and create accounts without seeing your email or password.",
+  "name": "Latch: sign-ins for your AI",
+  "short_name": "Latch",
+  "version": "1.0.0",
+  "description": "Let Claude, ChatGPT and other browser AIs sign in, create accounts and pass 2FA for you without ever seeing your password.",
   "minimum_chrome_version": "116",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArzqY2B0Y3wEPCNvLjXghvK5D+Pxp2Xxs7p3vra7NLtB9ibkwQZprZl7QG4QrDb8gsDkkqQ5iJmhbDuZ8/hTaxeh9PunQQDeIn7pwvPRv9ju8sciZD6/3/rT2Pva/yKWFFu3K8oRKjsBgtls3mvBLU1u1eSEIwF48MCDYuPNtMjznak6Fj39Ciri3FNJ+qxGPuiqvGrSY8vMaM9HFgOT5ERpH0w0au/WS08T1E7+SBahMO4P/5FsMk9ERepiHMNq3Br9Vxv2LnCyAmscTa5uXkJ4MZKIVPLhEtLFK7HqAMpHPyqTlBTHDw23R9Qae5jgP+C6kDYz/VugnrjuOAJ4b3wIDAQAB",
   "action": {
@@ -24,15 +25,35 @@
     "service_worker": "background.js",
     "type": "module"
   },
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["bar.js"],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ],
+  "options_ui": {
+    "page": "app.html",
+    "open_in_tab": true
+  },
+  "commands": {
+    "_execute_action": {
+      "suggested_key": { "default": "Alt+Shift+L" },
+      "description": "Open Latch"
+    }
+  },
   "permissions": [
     "storage",
     "scripting",
-    "tabs",
-    "tabGroups",
     "alarms",
-    "favicon"
+    "favicon",
+    "tabGroups"
   ],
   "host_permissions": [
     "<all_urls>"
-  ]
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+  }
 }

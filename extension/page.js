@@ -15,8 +15,13 @@
   }
   const byRef = id => refs.get(id)?.deref() ?? null;
 
+  // Latch's own on-page bar is never part of the site's form, wording or errors.
+  const OURS = 'latch-bar';
+  const ours = el => !!el?.closest?.(OURS);
+  const barText = () => [...document.querySelectorAll(OURS)].map(el => el.innerText || '').join(' ');
+
   function visible(el) {
-    if (!el?.isConnected) return false;
+    if (!el?.isConnected || ours(el)) return false;
     const style = getComputedStyle(el);
     if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse') return false;
     const r = el.getBoundingClientRect();
@@ -34,6 +39,7 @@
   }
   function collectRoots(root = document, out = []) {
     for (const el of root.querySelectorAll('*')) {
+      if (el.localName === OURS) continue;
       const shadow = shadowOf(el);
       if (shadow) { out.push(shadow); collectRoots(shadow, out); }
     }
@@ -57,13 +63,15 @@
   function deepAll(selector, root = document) {
     const out = [...root.querySelectorAll(selector)];
     for (const shadow of shadowRoots()) if (inside(root, shadow)) out.push(...shadow.querySelectorAll(selector));
-    return out;
+    return out.filter(el => !ours(el));
   }
 
   const SKIP_TEXT = /^(?:STYLE|SCRIPT|TEMPLATE|LINK|NOSCRIPT)$/;
   const fragmentText = root => [...root.children].filter(el => !SKIP_TEXT.test(el.tagName)).map(el => el.innerText ?? el.textContent ?? '').join(' ');
   function deepText(root, limit) {
     let text = root === document ? (document.body?.innerText || '') : root instanceof ShadowRoot ? fragmentText(root) : (root.innerText || root.textContent || '');
+    const bar = root === document || deepContains(root, document.querySelector(OURS)) ? barText() : '';
+    if (bar) text = text.replace(/\s+/g, ' ').replace(bar.replace(/\s+/g, ' ').trim(), ' ');
     for (const shadow of shadowRoots()) {
       if (text.length >= limit) break;
       if (inside(root, shadow)) text += ` ${fragmentText(shadow)}`;
@@ -223,6 +231,7 @@
       error: errorText(),
       recovery: recoveryForm(),
       reset: resetForm(),
+      totpSetup: totpSetup(),
       busy: deepAll('[aria-busy=true], button[disabled][type=submit]').some(visible),
       auth,
       actions,
@@ -276,15 +285,19 @@
       const scope = el.form || containerOf(el);
       if (scope && (scope === el.form || scope.tagName !== 'FORM')) scopes.add(scope);
     }
-    const candidates = [...scopes].map(recoveryIn).filter(Boolean);
+    // Most sites put "Forgot your password?" in the page heading, outside the form. That
+    // heading speaks for the form only when the page has no other email form and no password.
+    const alone = scopes.size === 1 && !deepAll('input[type=password]').some(visible);
+    const heading = alone ? [document.title, ...deepAll('h1, h2, h3, [role=heading]').filter(visible).map(textOf)].join(' ') : '';
+    const candidates = [...scopes].map(scope => recoveryIn(scope, heading)).filter(Boolean);
     return candidates.length === 1 ? candidates[0] : null;
   }
 
-  function recoveryIn(scope) {
+  function recoveryIn(scope, heading = '') {
     const isForm = scope.tagName === 'FORM';
     // A "Forgot your password?" button leads to the recovery form; it does not make this one.
     const leadsAway = label => RECOVERY_WORDING.test(label) && !RECOVERY_BUTTON.test(label);
-    if (!visible(scope) || !RECOVERY_WORDING.test(wordingOf(scope, leadsAway))) return null;
+    if (!visible(scope) || !RECOVERY_WORDING.test(`${heading} ${wordingOf(scope, leadsAway)}`)) return null;
     if (deepAll('input[type=password]', scope).some(visible)) return null;
     if (isForm && !sameHttps(formAction(scope))) return null;
     const emails = deepAll('input', scope).filter(el => visible(el) && kindOf(el)?.kind === 'email' && (isForm || !el.form));
@@ -342,6 +355,105 @@
     });
     if (buttons.length !== 1) return null;
     return { pw: [refOf(fresh[0].el), refOf(confirm[0].el)], button: refOf(buttons[0]), scope: refOf(scope) };
+  }
+
+  // An authenticator setup screen: wording about an authenticator app plus a setup key,
+  // an otpauth:// link or a QR code. inspect() reports only that these exist; the key
+  // itself leaves the page through readTotpSetup, which the 2FA setup flow alone calls.
+  const SETUP_WORDING = /authenticator|two[- ]?factor|\b2fa\b|two[- ]?step|2-step|multi[- ]?factor|\bmfa\b|\btotp\b/i;
+  const SETUP_ACTION = /scan|qr|set ?up|secret|setup key|text code|manually|enter (?:this|the) (?:key|code)|can.?t scan/i;
+  // In running text a following word can look like one more group of a key ("... 3pxp then"),
+  // so text matches count only when no element holds a key on its own.
+  const GROUPED_KEY = /(?:^|[^a-z0-9])((?:[a-z2-7]{4}[ -]){3,15}[a-z2-7]{1,4})(?=$|[^a-z0-9])/gi;
+  const SOLID_KEY = /(?:^|[^A-Za-z0-9])([A-Z2-7]{16,64})(?=$|[^A-Za-z0-9])/g;
+  const KEY_HOLDERS = 'input[readonly], input[disabled], code, kbd, samp, pre, span, strong, b, p, div, td, li, dd';
+  // One token, or groups of one length ("abcd efgh ..."), of base32 letters. Words in a sentence
+  // vary in length, and a real key almost always has a digit or is written in capitals.
+  const asKey = value => {
+    const raw = String(value || '').trim();
+    const groups = raw.split(/[ -]/);
+    const shaped = groups.length === 1 || (groups.length >= 4 && new Set(groups.slice(0, -1).map(g => g.length)).size === 1);
+    const key = groups.join('').toUpperCase();
+    if (!shaped || !/^[A-Z2-7]{16,128}$/.test(key)) return '';
+    return /[2-7]/.test(key) || raw === raw.toUpperCase() ? key : '';
+  };
+  const totpSetup = () => scan(findTotpSetup);
+
+  function keyCandidates(text) {
+    const held = new Set();
+    for (const el of deepAll(KEY_HOLDERS)) {
+      if (el.tagName !== 'INPUT' && el.children.length) continue;
+      const key = asKey(el.tagName === 'INPUT' ? el.value : textOf(el));
+      if (key && visible(el)) held.add(key);
+    }
+    if (held.size) return [...held];
+    const found = new Set();
+    for (const re of [GROUPED_KEY, SOLID_KEY]) {
+      for (const m of text.matchAll(re)) {
+        const key = asKey(m[1]);
+        if (key) found.add(key);
+      }
+    }
+    return [...found];
+  }
+
+  function qrCandidate() {
+    const hint = el => `${el.getAttribute('alt') || ''} ${el.getAttribute('aria-label') || ''} ${el.id} ${el.className?.baseVal ?? el.className} ${el.getAttribute('src') || ''} ${el.getAttribute('title') || ''}`;
+    const near = el => /qr|barcode|authenticator|totp|2fa|mfa|otp/i.test(hint(el));
+    const squares = deepAll('img, canvas, svg').filter(el => {
+      if (!visible(el) || el.closest('latch-bar')) return false;
+      const r = el.getBoundingClientRect();
+      return r.width >= 80 && r.width <= 600 && Math.abs(r.width - r.height) <= r.width * 0.12;
+    });
+    const pick = squares.find(near) || (squares.length === 1 ? squares[0] : null);
+    return pick && window === window.top ? pick : null;
+  }
+
+  // Brings the QR code into view and says where it is, for the setup flow's screenshot.
+  function qrRect() {
+    const pick = scan(qrCandidate);
+    if (!pick) return null;
+    pick.scrollIntoView({ block: 'center', inline: 'center' });
+    const r = pick.getBoundingClientRect();
+    return { x: r.left, y: r.top, w: r.width, h: r.height, dpr: devicePixelRatio };
+  }
+
+  function findTotpSetup() {
+    const text = deepText(document, 20000);
+    if (!SETUP_WORDING.test(text) || !SETUP_ACTION.test(text)) return null;
+    // A sign-in that merely asks for an app code has neither a key nor a QR code.
+    const uris = deepAll('a[href]').map(a => a.getAttribute('href')).filter(h => /^otpauth:\/\/totp\//i.test(h || ''));
+    const keys = keyCandidates(text);
+    const qr = uris.length || keys.length ? null : qrCandidate();
+    if (!uris.length && keys.length !== 1 && !qr) return null;
+    return { uri: uris.length === 1, key: keys.length === 1, qr: !!qr };
+  }
+
+  function readTotpSetup() {
+    const text = deepText(document, 20000);
+    if (!SETUP_WORDING.test(text)) return {};
+    const uris = deepAll('a[href]').map(a => a.getAttribute('href')).filter(h => /^otpauth:\/\/totp\//i.test(h || ''));
+    if (uris.length === 1) return { uri: uris[0] };
+    const keys = keyCandidates(text);
+    return keys.length === 1 ? { secret: keys[0] } : {};
+  }
+
+  // Fills a new password into both reset fields and presses the form's own button.
+  function fillResetAndSubmit({ refs: targets, value, expectedUrl } = {}) {
+    const current = resetForm();
+    const filledIn = fillReset({ refs: targets, value, expectedUrl });
+    if (!filledIn.ok) return filledIn;
+    for (const ref of targets) filled.add(ref);
+    const button = byRef(current?.button);
+    if (!button?.isConnected) return { ok: false, filled: true };
+    let event = null;
+    const onSubmit = e => { event = e; };
+    addEventListener('submit', onSubmit, true);
+    try { press(button); } finally { removeEventListener('submit', onSubmit, true); }
+    if (event && !event.defaultPrevented) {
+      for (const ref of targets) { const el = byRef(ref); if (el) el.value = ''; }
+    }
+    return { ok: true, submitted: true };
   }
 
   // Fills the new and confirm fields only; the user presses the page's button.
@@ -707,5 +819,5 @@
     return false;
   }
 
-  globalThis.__latch = { inspect, fillAndSubmit, fillCode, fillOne, clearFilled, secretsLeft, requestRecovery, fillReset };
+  globalThis.__latch = { inspect, fillAndSubmit, fillCode, fillOne, clearFilled, secretsLeft, requestRecovery, fillReset, fillResetAndSubmit, readTotpSetup, qrRect };
 })();

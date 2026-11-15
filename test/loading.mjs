@@ -4,7 +4,7 @@ import { cpSync, mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:f
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { chromium } from 'playwright';
+import { launchWithExtension } from './launch.mjs';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 
@@ -71,12 +71,14 @@ const transport = new StdioClientTransport({ command: process.execPath, args: [j
 let context;
 try {
   await mcp.connect(transport);
-  context = await chromium.launchPersistentContext(join(work, 'profile'), { channel: 'chromium', headless: true, args: [`--disable-extensions-except=${ext}`, `--load-extension=${ext}`] });
+  let sw;
+  ({ context, sw } = await launchWithExtension(join(work, 'profile'), ext, { headless: true }));
   context.on('weberror', error => console.error('browser error:', error.error().message));
-  const sw = context.serviceWorkers()[0] || await context.waitForEvent('serviceworker', { timeout: 15000 });
   const popup = await context.newPage();
   await popup.goto(`chrome-extension://${new URL(sw.url()).host}/popup.html`);
   await popup.evaluate(() => chrome.runtime.sendMessage({ type: 'saveIdentity', email: 'loading-canary@example.test', password: 'Loading-Canary!7' }));
+  // An unattended AI: no approval window for the new site.
+  await popup.evaluate(() => chrome.runtime.sendMessage({ type: 'settings', patch: { confirmNewSites: false } }));
   const page = await context.newPage();
   await page.goto(`http://jobs.localhost:${site.address().port}/login`, { waitUntil: 'domcontentloaded' });
   const tabId = await popup.evaluate(async url => (await chrome.tabs.query({})).find(tab => tab.url === url).id, page.url());

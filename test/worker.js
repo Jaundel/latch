@@ -89,10 +89,13 @@ if (!isMainThread) {
     fillReset: arg => fill('fillReset', arg),
     clearFilled: () => ({ cleared: 0 }),
   };
+  // These runs play an unattended AI, so no approval window is asked for.
+  storage.local.settings = { confirmNewSites: false, ...storage.local.settings };
   const runtime = {
     id: extensionId,
     getURL: path => `chrome-extension://${extensionId}/${path}`,
-    onInstalled: listeners(), onStartup: listeners(), onMessage: listeners(),
+    getManifest: () => ({ version: '1.0.0' }),
+    onInstalled: listeners(), onStartup: listeners(), onMessage: listeners(), onConnect: listeners(),
     sendMessage: async () => {},
   };
   globalThis.chrome = {
@@ -109,8 +112,11 @@ if (!isMainThread) {
         return made;
       },
       remove: async id => { openedTabs.delete(id); },
+      update: async (id, props) => Object.assign(openedTabs.get(id) || tab, props),
+      sendMessage: async () => {},
+      onRemoved: listeners(), onUpdated: listeners(),
     },
-    windows: { get: async () => ({ focused: true }) },
+    windows: { get: async () => ({ focused: true }), create: async () => { throw new Error('no windows here'); }, remove: async () => {}, onRemoved: listeners() },
     scripting: {
       executeScript: async ({ files, func, args }) => {
         if (files) { await gate; return []; }

@@ -2,7 +2,7 @@
 // real extension in Chromium against local fake sites and a fake IMAP inbox.
 // It plays the AI's part (filling non-credential fields, reading the page) and
 // checks that nothing private reaches the AI.
-import { chromium } from 'playwright';
+import { launchWithExtension } from './launch.mjs';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -58,16 +58,12 @@ const mcp = new Client({ name: 'latch-e2e', version: '1.0.0' });
 await mcp.connect(transport);
 
 const { tools } = await mcp.listTools();
-check('MCP server lists the seven tools', tools.map(t => t.name).sort().join() === 'application_page,create_account,fill_email,inspect_connection,request_password_recovery,sign_in,verify_email', tools.map(t => t.name).join(' '));
+check('MCP server lists the nine tools', tools.map(t => t.name).sort().join() === 'application_page,create_account,fill_email,inspect_connection,request_password_recovery,set_new_password,setup_two_factor,sign_in,verify_email', tools.map(t => t.name).join(' '));
 
-const context = await chromium.launchPersistentContext(join(work, 'profile'), {
-  channel: 'chromium',
-  headless: process.env.HEADED !== '1',
+const { context, sw } = await launchWithExtension(join(work, 'profile'), ext, {
   viewport: { width: 1100, height: 800 },
-  args: [`--disable-extensions-except=${ext}`, `--load-extension=${ext}`, '--host-resolver-rules=MAP plain.example 127.0.0.1, MAP collector.example 127.0.0.1'],
+  args: ['--host-resolver-rules=MAP plain.example 127.0.0.1, MAP collector.example 127.0.0.1'],
 });
-let [sw] = context.serviceWorkers();
-sw ??= await context.waitForEvent('serviceworker');
 check('extension loads with its pinned ID', new URL(sw.url()).host === EXTENSION_ID);
 
 const popup = await context.newPage();
@@ -79,27 +75,33 @@ for (let i = 0; i < 60 && !(await latchState()).connected; i++) await sleep(250)
 check('extension connects to the local MCP server', (await latchState()).connected);
 await popup.screenshot({ path: join(out, 'popup-setup.png') });
 
-// ---------- setup through the popup, as the user would
-await popup.fill('#email', MAIN.email);
-await popup.fill('#password', MAIN.password);
-await popup.click('button[type=submit]');
-await popup.waitForSelector('#app-password');
-await popup.fill('#app-password', APP_PASSWORD);
-await popup.click('details.adv summary');
-const adv = popup.locator('.adv-grid input');
+// ---------- setup in the Latch page, as the user would: one step
+const app = await context.newPage();
+await app.goto(`chrome-extension://${EXTENSION_ID}/app.html#welcome`);
+await app.fill('#email', MAIN.email);
+await app.fill('#password', MAIN.password);
+await app.click('form button[type=submit]');
+await app.waitForSelector('h1:has-text("ready")', { timeout: 15000 });
+await app.screenshot({ path: join(out, 'app-ready.png') });
+check('setup takes one step: email and password', (await latchState()).setup);
+// This run plays an unattended AI, so the first-use approval is off; test/bar.mjs covers approval.
+await popup.evaluate(() => chrome.runtime.sendMessage({ type: 'settings', patch: { confirmNewSites: false } }));
+
+// The optional inbox connection, on the Connect page.
+await app.goto(`chrome-extension://${EXTENSION_ID}/app.html#connect`);
+await app.waitForSelector('#app-password', { timeout: 15000 });
+await app.fill('#app-password', APP_PASSWORD);
+await app.click('#inbox details summary');
+const adv = app.locator('#inbox details input');
 await adv.nth(0).fill('127.0.0.1');
 await adv.nth(1).fill(String(imap.port));
-await adv.nth(3).uncheck();
-await popup.screenshot({ path: join(out, 'popup-inbox.png') });
-await popup.click('form button[type=submit]');
-await popup.waitForSelector('h1:has-text("Connect your AI")', { timeout: 30000 });
-await popup.waitForSelector('.live.on');
-await popup.screenshot({ path: join(out, 'popup-connect.png') });
-check('setup ends on a live AI connection step', await popup.locator('.live.on').count() === 1);
-await popup.click('button:has-text("Done")');
-await popup.waitForSelector('.identity', { timeout: 30000 });
-check('setup completes in the popup', true);
+await adv.nth(3).uncheck({ force: true });
+await app.click('#inbox button[type=submit]');
+await app.waitForSelector('#inbox :text("Inbox connected")', { timeout: 30000 });
 check('inbox password is verified live over IMAP', imapStats.logins >= 1, `${imapStats.logins} login`);
+await app.waitForSelector('.live.on', { timeout: 15000 });
+check('the Connect page shows the live AI connection', await app.locator('.live.on').count() === 1);
+await app.screenshot({ path: join(out, 'app-connect.png') });
 
 // ---------- helpers that play the AI's side
 const transcript = [];
@@ -392,7 +394,7 @@ try {
   check('the AI can finish the step from the inbox itself', sites.accounts.get(`later.localhost|${MAIN.email}`).verified === true);
 
   await popup.reload();
-  await popup.waitForSelector('.identity');
+  await popup.waitForSelector('.page');
   await popup.screenshot({ path: join(out, 'popup-home.png') });
   await popup.emulateMedia({ colorScheme: 'dark' });
   await popup.screenshot({ path: join(out, 'popup-home-dark.png') });

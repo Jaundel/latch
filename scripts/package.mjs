@@ -1,14 +1,17 @@
 // Builds dist/latch-<version>.zip for the Chrome Web Store.
 // The store assigns its own ID, so the pinned "key" is left out, along with the
 // local install file. After the first upload, put the store's ID in extension/id.js.
-import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
-import { join, relative, sep } from 'node:path';
+// The job application module serves a separate local tool, not Latch's single purpose,
+// so it and the tabGroups permission it needs stay out of the store build.
+import { mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { dirname, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { crc32, deflateRawSync } from 'node:zlib';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const source = join(root, 'extension');
-const skip = new Set(['install.json']);
+const skip = new Set(['install.json', 'application.js', 'application-scan.js']);
+const STORE_PERMISSIONS = ['storage', 'scripting', 'alarms', 'favicon'];
 
 function files(dir) {
   return readdirSync(dir).flatMap(name => {
@@ -24,6 +27,7 @@ const entries = files(source).map(path => {
   if (name === 'manifest.json') {
     const manifest = JSON.parse(data);
     delete manifest.key;
+    manifest.permissions = manifest.permissions.filter(p => STORE_PERMISSIONS.includes(p));
     data = Buffer.from(JSON.stringify(manifest, null, 2) + '\n');
   }
   return { name, data };
@@ -59,3 +63,12 @@ mkdirSync(join(root, 'dist'), { recursive: true });
 const out = join(root, 'dist', `latch-${version}.zip`);
 writeFileSync(out, Buffer.concat([...local, ...central, end]));
 console.log(`${relative(root, out)}  (${entries.length} files)`);
+
+// The same files unpacked, for "Load unpacked" and for testing exactly what the store gets.
+const unpacked = join(root, 'dist', `latch-${version}`);
+rmSync(unpacked, { recursive: true, force: true });
+for (const { name, data } of entries) {
+  mkdirSync(dirname(join(unpacked, name)), { recursive: true });
+  writeFileSync(join(unpacked, name), data);
+}
+console.log(relative(root, unpacked));

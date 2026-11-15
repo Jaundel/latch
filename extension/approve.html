@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Latch: allow this site?</title>
+  <link rel="icon" href="icons/32.png">
+  <link rel="stylesheet" href="ui.css">
+  <style>
+    body { background: var(--bg); }
+    main { padding: 28px 28px 24px; max-width: 440px; margin: 0 auto; }
+    .brand { margin-bottom: 22px; }
+    h1 { font-size: 19px; letter-spacing: -.02em; margin: 0 0 10px; }
+    .site { font-size: 22px; font-weight: 500; letter-spacing: -.01em; margin: 0 0 16px; padding: 12px 14px; border-radius: 12px; background: var(--bg-2); border: 1px solid var(--line); word-break: break-all; }
+    .site b { font-weight: 750; }
+    p { color: var(--fg-2); margin: 0 0 12px; }
+    .warn { display: flex; gap: 10px; padding: 10px 12px; border-radius: 10px; background: var(--warn-soft); color: var(--warn); font-size: 13px; }
+    .buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 20px; }
+    .foot { margin-top: 14px; font-size: 12px; color: var(--fg-3); text-align: center; }
+  </style>
+  <script src="approve.js" type="module"></script>
+</head>
+<body>
+  <main id="view" aria-live="polite"></main>
+</body>
+</html>

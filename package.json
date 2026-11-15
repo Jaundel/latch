@@ -1,8 +1,9 @@
 {
   "name": "latch",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
-  "description": "Lets a Chrome-connected AI sign in and create accounts without seeing your email or password.",
+  "description": "Chrome extension that lets browser AIs sign in, create accounts, pass 2FA and reset passwords without seeing your credentials. Includes an optional MCP server for terminal AIs.",
+  "license": "MIT",
   "type": "module",
   "engines": {
     "node": ">=20"
@@ -14,11 +15,13 @@
     "start": "node server/index.js",
     "setup": "node scripts/setup.mjs",
     "icons": "node scripts/make-icons.mjs",
+    "vendor": "node scripts/vendor.mjs",
     "package": "node scripts/package.mjs",
-    "test": "node --test test/page.mjs test/domains.mjs test/auth-result.mjs test/guard.mjs test/frames.mjs test/private-focus.mjs test/cgi-account.mjs test/popup.mjs test/mail.mjs && node test/bridge.mjs && node test/loading.mjs && node test/e2e.mjs",
-    "test:page": "node --test test/page.mjs",
-    "test:chrome": "node --test test/page.mjs test/domains.mjs test/auth-result.mjs test/guard.mjs test/frames.mjs test/private-focus.mjs test/cgi-account.mjs test/popup.mjs test/mail.mjs && node test/bridge.mjs",
-    "test:loading": "node test/loading.mjs"
+    "store-assets": "node store/make-assets.mjs",
+    "test": "npm run test:unit && npm run test:extension && node test/e2e.mjs",
+    "test:unit": "node --test test/page.mjs test/domains.mjs test/auth-result.mjs test/guard.mjs test/frames.mjs test/private-focus.mjs test/cgi-account.mjs test/popup.mjs test/mail.mjs test/totp.mjs",
+    "test:extension": "node --test --test-concurrency=1 test/bar.mjs && node test/bridge.mjs && node test/loading.mjs",
+    "test:page": "node --test test/page.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.2",
@@ -28,6 +31,8 @@
     "zod": "4.6.7"
   },
   "devDependencies": {
-    "playwright": "1.64.1"
+    "jsqr": "1.4.0",
+    "playwright": "1.64.1",
+    "qrcode": "1.5.4"
   }
 }

@@ -30,6 +30,7 @@
   const elementIds = new WeakMap(), elements = new Map();
   let nextId = 1;
   const visible = el => {
+    if (el?.closest?.("latch-bar")) return false;
     if (!el || !el.isConnected) return false;
     const s = getComputedStyle(el), r = el.getBoundingClientRect();
     return s.display !== 'none' && s.visibility !== 'hidden' && (r.width > 0 || r.height > 0);

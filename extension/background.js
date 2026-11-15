@@ -1,11 +1,14 @@
-// Latch service worker. Holds the vault, talks to the local MCP server, and runs
-// sign-in, sign-up and verification flows in the AI's tab. Results sent back to
-// the server carry statuses only, never credentials or codes.
+// Latch service worker. Holds the vault and runs sign-in, sign-up, verification,
+// 2FA and password reset flows in a tab. Flows start from the on-page bar (any
+// browser AI or the user presses it), the popup, or the optional local MCP server.
+// Results carry statuses only, never credentials, codes or keys.
 
 import { fingerprint, BRIDGE_PROTOCOL } from './build.js';
-import { baseDomain, isCandidatePortal, recoverySite, resetLinkAllowed, sharedHost, siteFor } from './domains.js';
+import { baseDomain, isAtsHost, isCandidatePortal, recoverySite, resetLinkAllowed, sharedHost, siteFor } from './domains.js';
 import { classifySignInError } from './auth-result.js';
 import { mainPasswordRisk } from './guard.js';
+import { freshCode, parseKey, parseOtpauth, secondsLeft, totp } from './totp.js';
+import jsQR from './vendor/jsqr.js';
 
 const PORT = 47801;
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -101,7 +104,10 @@ function updateVault(fn) {
   return run;
 }
 
-const DEFAULT_SETTINGS = { paused: false, newPasswords: 'unique' };
+// confirmNewSites: the first time the main password would go to a site Latch has never
+// signed in to, the user approves it in a Latch window that page scripts and browser AIs
+// cannot reach. Installs from before this setting existed keep running unattended.
+const DEFAULT_SETTINGS = { paused: false, newPasswords: 'unique', confirmNewSites: true, bar: true, approvedSites: [] };
 
 async function getMeta() {
   const m = await chrome.storage.local.get(['settings', 'activity', 'usedMail']);
@@ -268,7 +274,7 @@ async function snapshot(tabId, { observe = true } = {}) {
 }
 
 async function inFrame(tabId, frameId, op, arg) {
-  if (['fillAndSubmit', 'fillCode', 'fillOne', 'requestRecovery'].includes(op)) {
+  if (['fillAndSubmit', 'fillCode', 'fillOne', 'requestRecovery', 'fillResetAndSubmit'].includes(op)) {
     beforeAction();
     // Private authentication does not pass through applicationTool. Set up the
     // current document before acting, including after an authentication redirect.
@@ -281,7 +287,7 @@ async function inFrame(tabId, frameId, op, arg) {
     target: { tabId, frameIds: [frameId] },
     injectImmediately: true,
     func: (op, arg) => globalThis.__latch?.[op]?.(arg) ?? { ok: false },
-    args: [op, arg],
+    args: [op, arg ?? null],
   }).catch(() => []);
   if (observation && ['fillAndSubmit', 'fillCode'].includes(op)) {
     observation.fill_submit_ms += now() - started;
@@ -443,8 +449,62 @@ async function credentialFor(ctx, host, formActionHost = '', { use } = {}) {
       },
     };
   }
+  if (needsApproval(ctx, host)) {
+    const answer = await askApproval(host, ctx.tabId);
+    if (answer !== 'allow') {
+      const denied = answer === 'deny';
+      return {
+        blocked: {
+          status: 'needs_user', reason: denied ? 'approval_denied' : 'approval_missing', site: host, retryable: !denied, next_action: 'ask_user',
+          message: denied
+            ? `The user chose not to let Latch use their password on ${host}. Do not try again on this site; ask the user how to proceed.`
+            : `Latch asked the user to allow signing in to ${host} and got no answer. Ask the user to approve it in the Latch window, then try again.`,
+        },
+      };
+    }
+  }
   // Tagged with the host signed in to: a sibling's entry says nothing about this account.
   return { username: site?.username || main.email, password: main.password, host, source: 'main' };
+}
+
+// ---------- approving the main password for a new site
+
+// A site counts as known once Latch has signed in or created an account there.
+const knownSite = (vault, host) => Object.keys(vault.sites).some(h => h === host || baseDomain(h) === baseDomain(host));
+
+function needsApproval(ctx, host) {
+  if (ctx.client === 'you' || !ctx.meta?.settings?.confirmNewSites) return false;
+  if (knownSite(ctx.vault, host)) return false;
+  return !(ctx.meta.settings.approvedSites || []).includes(baseDomain(host));
+}
+
+const approvals = new Map(); // id -> { host, tabId, resolve }
+
+async function askApproval(host, tabId) {
+  beforeAction();
+  const id = crypto.randomUUID();
+  const answer = new Promise(resolve => approvals.set(id, { host, tabId, resolve }));
+  barProgress(tabId, `Waiting for you to allow Latch on ${baseDomain(host)} in the Latch window.`);
+  const win = await chrome.windows.create({ url: chrome.runtime.getURL(`approve.html#${id}`), type: 'popup', width: 440, height: 560, focused: true }).catch(() => null);
+  if (!win) { approvals.delete(id); return 'unavailable'; }
+  const settle = value => approvals.get(id)?.resolve(value);
+  const closed = windowId => { if (windowId === win.id) settle('closed'); };
+  chrome.windows.onRemoved.addListener(closed);
+  const timer = setTimeout(() => settle('timeout'), 180000);
+  const watch = setInterval(() => { if (stopped(activeJob)) settle('cancelled'); }, 500);
+  const result = await answer;
+  approvals.delete(id);
+  clearTimeout(timer);
+  clearInterval(watch);
+  chrome.windows.onRemoved.removeListener(closed);
+  chrome.windows.remove(win.id).catch(() => {});
+  if (result === 'allow') {
+    const { settings } = await getMeta();
+    const approvedSites = [...new Set([baseDomain(host), ...(settings.approvedSites || [])])].slice(0, 500);
+    await chrome.storage.local.set({ settings: { ...settings, approvedSites } });
+    barProgress(tabId, 'Allowed. Signing in…');
+  }
+  return result;
 }
 
 // The other credential to try once after a rejection, or null. Passwords are compared only here.
@@ -538,11 +598,19 @@ const enterCode = (ctx, frame) => measured('verification_ms', () => enterCodeSte
 async function enterCodeStep(ctx, frame) {
   const host = frame.host;
   const f = frame.flags;
+  const key = totpFor(ctx.vault, host);
+  if ((f.appCode && !f.emailCode) || (key && !f.emailCode && !f.phoneCode)) {
+    if (!key) {
+      return needsUser('authenticator_code', host, 'The site wants a code from an authenticator app, and Latch has no 2FA key for this site. Ask the user for the code, or ask them to add the site\'s 2FA key in Latch.');
+    }
+    const code = await freshCode(key);
+    const refs = frame.digits.length >= 4 ? frame.digits : [frame.fields.find(x => x.kind === 'code').ref];
+    await inFrame(ctx.tabId, frame.frameId, 'fillCode', { refs, code });
+    ctx.twoFactor = true;
+    return null;
+  }
   if (f.phoneCode && !f.emailCode) {
     return needsUser('phone_code', host, 'The site sent a code to the user\'s phone. Ask the user to enter it in the tab, then continue.');
-  }
-  if (f.appCode && !f.emailCode) {
-    return needsUser('authenticator_code', host, 'The site wants a code from an authenticator app. Ask the user to enter it in the tab, then continue.');
   }
   if (!ctx.vault.mailbox) return mailProblem(ctx, {}, host, 'code');
   const mail = await fetchMail(ctx, host, 'code');
@@ -580,8 +648,8 @@ function needsUser(reason, site, message) {
 // While a recovery email is on its way the newest site email may be it, however it is worded,
 // so no link is opened and the AI is not sent to the inbox.
 function resetWaiting(host) {
-  return { ...needsUser('recovery_pending', host, 'A password recovery is waiting on this site, so Latch will not open an emailed link or send you to the inbox. The user finishes or dismisses it from the Latch popup (Password resets). Call verify_email again after that if it is still needed.'),
-    next_action: 'user_completes_reset' };
+  return { ...needsUser('recovery_pending', host, 'A password reset email is on its way for this site, so Latch will not open emailed links here. Open the reset link from the newest email from this site in the user\'s inbox, then call set_new_password on the reset page. Call verify_email again after that if it is still needed.'),
+    next_action: 'open_reset_link' };
 }
 
 const siteSaid = text => (text ? ` The site says: "${text.slice(0, 120)}"` : '');
@@ -599,7 +667,7 @@ function redact(result, vault) {
   add(vault.identity?.password);
   add(vault.mailbox?.user);
   add(vault.mailbox?.pass);
-  for (const s of Object.values(vault.sites)) { add(s.password); add(s.username); }
+  for (const s of Object.values(vault.sites)) { add(s.password); add(s.username); add(s.previousPassword); add(s.totp?.secret); }
   const scrub = text => {
     let out = String(text);
     for (const s of [...secrets].sort((a, b) => b.length - a.length)) out = out.replace(new RegExp(escapeRe(s), 'gi'), '[hidden]');
@@ -624,8 +692,8 @@ async function recordActivity(tool, result, client = '') {
 function resetPage(snap, host) {
   const f = snap.find(x => x.reset);
   if (!f) return null;
-  return { status: 'reset_form', site: f.host || host, next_action: 'user_completes_reset',
-    message: 'This is a password reset page. The user finishes it from the Latch popup (Use my main password), then sign_in can run on the sign-in page.' };
+  return { status: 'reset_form', site: f.host || host, next_action: 'set_new_password',
+    message: 'This is a password reset page. Call set_new_password here; Latch chooses, enters and saves the new password.' };
 }
 
 // A set-password step can read as a reset form. Once signIn has called it a sign-up,
@@ -858,6 +926,9 @@ async function loginFailed(ctx, frame, pass) {
 
 async function codeRejected(ctx, host) {
   await clearAll(ctx.tabId);
+  if (ctx.twoFactor) {
+    return { status: 'verification_failed', reason: 'authenticator_code', site: host, message: 'The site did not accept the 2FA code from Latch\'s saved key. The key may be out of date; ask the user to check the site\'s two-factor settings.' };
+  }
   return { status: 'verification_failed', site: host, message: 'The site did not accept the emailed code. Call verify_email to try a newer one, or ask the user.' };
 }
 
@@ -1051,6 +1122,7 @@ async function verifyEmail(ctx) {
     snap = await settle(tabId, before);
     if (stateOf(pickFrame(snap)) === 'code') return codeRejected(ctx, host);
     await clearAll(tabId);
+    if (ctx.twoFactor) return { status: 'verified', reason: 'authenticator_code', site: host, message: 'Entered the 2FA code. Continue your task in this tab.' };
     await markVerified(host);
     return { status: 'verified', site: host, message: 'Email verified. Continue your task in this tab.' };
   }
@@ -1085,9 +1157,11 @@ async function requestPasswordRecovery(ctx) {
   if (insecure(tab.url) || new URL(tab.url).protocol !== 'https:') return blocked(host);
   const site = ctx.vault.sites[host];
   const isEmail = s => typeof s === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
-  // Job portals made before Latch saved them, or left pending, are registered under the user's email.
-  const email = site?.status === 'active' ? (isEmail(site.username) ? site.username : null)
-    : isCandidatePortal(tab.url) && isEmail(ctx.vault.identity.email) ? ctx.vault.identity.email : null;
+  // A saved account with a user name that is not an email cannot be recovered by email here.
+  // Employee systems (a company's own Workday, say) sign in with a work identity, not this one.
+  const employeeSystem = isAtsHost(host) && !isCandidatePortal(tab.url);
+  const email = site?.status === 'active' && site.username ? (isEmail(site.username) ? site.username : null)
+    : !employeeSystem && isEmail(ctx.vault.identity.email) ? ctx.vault.identity.email : null;
   if (!email)
     return { status: 'needs_user', reason: 'identity_uncertain', site: host, next_action: 'inspect_account', message: 'Latch cannot establish an active account with an email username saved for this exact host. Inspect the account before requesting recovery.' };
   const snap = await snapshot(tabId);
@@ -1113,15 +1187,187 @@ async function requestPasswordRecovery(ctx) {
     if (!current || hostOf(current.url) !== host || insecure(current.url)) break;
     const after = await snapshot(tabId);
     if (flagged(after, 'recoverySent')) {
-      return { status: 'needs_user', reason: 'recovery_requested', site: host, next_action: 'user_completes_reset',
-        message: 'Recovery email requested. The user finishes it from the Latch popup (Password resets: Open reset email, then Use my main password). Do not request again; try sign_in on a later run.' };
+      return { status: 'needs_user', reason: 'recovery_requested', site: host, next_action: 'open_reset_link',
+        message: 'Reset email requested. Open the newest email from this site in the user\'s inbox and open its reset link, then call set_new_password on the reset page. Do not request another one.' };
     }
     if (after.some(f => f.error)) break;
   }
   return { status: now() >= activeJob.recoveryDeadline ? 'outcome_unknown' : 'unconfirmed', site: host, next_action: 'inspect_page', message: 'The recovery request was sent, but the site did not confirm its outcome. Inspect the page before retrying.' };
 }
 
-const FLOWS = { sign_in: signIn, create_account: createAccount, verify_email: verifyEmail, fill_email: fillEmail, request_password_recovery: requestPasswordRecovery };
+// ---------- two-factor codes
+
+// The key for this host, or for the one site on the same domain that has a key.
+function totpFor(vault, host) {
+  if (vault.sites[host]?.totp) return vault.sites[host].totp;
+  const base = baseDomain(host);
+  const hits = Object.entries(vault.sites).filter(([h, s]) => s.totp && baseDomain(h) === base);
+  return hits.length === 1 ? hits[0][1].totp : null;
+}
+
+// Which saved site a 2FA key or new password on `host` belongs to.
+function ownerOf(vault, host) {
+  if (vault.sites[host]) return host;
+  return recoverySite(vault, host)?.host || siteFor(vault, host)?.host || host;
+}
+
+// Reads an otpauth:// QR code off the screen when the page shows no key as text.
+async function readQrKey(ctx) {
+  let tab = await chrome.tabs.get(ctx.tabId).catch(() => null);
+  if (!tab) return null;
+  // A screenshot shows the window's front tab, so this tab has to be the one in front.
+  if (!tab.active) {
+    beforeAction();
+    tab = await chrome.tabs.update(tab.id, { active: true }).catch(() => null);
+    if (!tab?.active) return null;
+    await sleep(400);
+  }
+  const [res] = await chrome.scripting.executeScript({ target: { tabId: ctx.tabId, frameIds: [0] }, func: () => globalThis.__latch?.qrRect() ?? null }).catch(() => []);
+  const rect = res?.result;
+  if (!rect) return null;
+  await sleep(350);
+  const shot = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' }).catch(() => null);
+  if (!shot) return null;
+  const image = await createImageBitmap(await (await fetch(shot)).blob());
+  const scale = rect.dpr || 1;
+  const pad = 12;
+  const sx = Math.max(0, Math.floor((rect.x - pad) * scale));
+  const sy = Math.max(0, Math.floor((rect.y - pad) * scale));
+  const sw = Math.min(image.width - sx, Math.ceil((rect.w + pad * 2) * scale));
+  const sh = Math.min(image.height - sy, Math.ceil((rect.h + pad * 2) * scale));
+  if (sw < 40 || sh < 40) return null;
+  const canvas = new OffscreenCanvas(sw, sh);
+  const g = canvas.getContext('2d', { willReadFrequently: true });
+  g.drawImage(image, sx, sy, sw, sh, 0, 0, sw, sh);
+  const found = jsQR(g.getImageData(0, 0, sw, sh).data, sw, sh, { inversionAttempts: 'attemptBoth' });
+  return found?.data ? parseOtpauth(found.data) : null;
+}
+
+// After a code goes in: the page has moved past the code step, or shows an error on it.
+// A confirmation page has no fields at all, so this does not wait for one like settle() does.
+async function stepAnswered(tabId, before, asking, ms = 15000) {
+  const end = now() + ms;
+  let snap = [];
+  await sleep(500);
+  while (now() < end) {
+    if (stopped(activeJob)) throw new Stopped();
+    const tab = await chrome.tabs.get(tabId).catch(() => null);
+    if (!tab) return [];
+    if (tab.status === 'complete') {
+      snap = await snapshot(tabId);
+      const step = asking(snap);
+      if (snap.length && signature(snap) !== before && (!step || step.error || pickFrame(snap)?.error)) return snap;
+    }
+    await sleep(350);
+  }
+  return snap;
+}
+const codeAnswered = (tabId, before) => stepAnswered(tabId, before, snap => snap.find(f => stateOf(f) === 'code'));
+
+async function setupTwoFactor(ctx) {
+  const { tabId } = ctx;
+  const snap = await waitForFields(tabId, 3000);
+  const frame = snap.find(f => f.totpSetup);
+  if (!frame) {
+    return { status: 'no_form', site: hostOf(ctx.tab.url), message: 'No authenticator app setup found on this page. Open the site\'s two-factor settings, choose the authenticator app option, then try again.' };
+  }
+  if (insecure(frame.url)) return blocked(frame.host);
+  beforeAction();
+  const read = await inFrame(tabId, frame.frameId, 'readTotpSetup');
+  let key = read?.uri ? parseOtpauth(read.uri) : read?.secret ? parseKey(read.secret) : null;
+  if (!key && frame.totpSetup.qr) key = await readQrKey(ctx);
+  if (!key) {
+    return needsUser('totp_key_unreadable', frame.host, 'Latch could not read the setup key. Press the page\'s "Can\'t scan it?" or "enter the key manually" link so the key shows as text, then try again.');
+  }
+  const host = ownerOf(ctx.vault, frame.host);
+  const saved = { secret: key.secret, digits: key.digits, period: key.period, algorithm: key.algorithm, issuer: key.issuer || '', addedAt: now(), verified: false };
+  await updateVault(v => {
+    v.sites[host] ||= { username: v.identity.email, password: null, source: 'main', createdAt: now(), status: 'active' };
+    v.sites[host].totp = saved;
+  });
+  // Most sites ask for one code to confirm the key before turning 2FA on.
+  const current = (await snapshot(tabId)).find(f => f.frameId === frame.frameId) || frame;
+  const refs = current.digits.length >= 4 ? current.digits : current.fields.filter(x => x.kind === 'code').map(x => x.ref).slice(0, 1);
+  if (!refs.length) {
+    return { status: 'two_factor_saved', site: host, verified: false,
+      message: 'Saved the 2FA key. When the site asks for a code to confirm it, call verify_email.' };
+  }
+  const before = signature([current]);
+  await inFrame(tabId, current.frameId, 'fillCode', { refs, code: await freshCode(saved) });
+  const after = await codeAnswered(tabId, before);
+  const still = after.find(f => stateOf(f) === 'code');
+  if (still?.error) {
+    await updateVault(v => { if (v.sites[host]) delete v.sites[host].totp; });
+    return { status: 'verification_failed', reason: 'authenticator_code', site: host,
+      message: `The site did not accept the code from the key Latch read, so Latch dropped that key. Ask the user to check the setup page.${siteSaid(still.error)}` };
+  }
+  if (still) {
+    return { status: 'unconfirmed', site: host, verified: false, next_action: 'inspect_page',
+      message: 'Saved the 2FA key and entered a code, but the site has not confirmed 2FA is on. Inspect the page before continuing.' };
+  }
+  await updateVault(v => { if (v.sites[host]?.totp) v.sites[host].totp.verified = true; });
+  return { status: 'two_factor_saved', site: host, verified: true,
+    message: 'Saved the 2FA key and confirmed it with a code. Latch enters this site\'s 2FA codes from now on. If the site shows backup codes, ask the user to keep them somewhere safe.' };
+}
+
+// ---------- forgotten passwords: choosing the new one
+
+async function setNewPassword(ctx) {
+  const { tabId } = ctx;
+  const snap = await waitForFields(tabId, 3000);
+  const frames = snap.filter(f => f.reset);
+  if (frames.length !== 1) {
+    return { status: 'no_form', site: hostOf(ctx.tab.url), message: 'No new-password form found in this tab. Open the reset link from the site\'s email first, then try again.' };
+  }
+  const [frame] = frames;
+  if (insecure(frame.url)) return blocked(frame.host);
+  if (!frame.top && baseDomain(frame.host) !== baseDomain(hostOf(ctx.tab.url))) {
+    return { status: 'no_form', site: hostOf(ctx.tab.url), message: 'The new-password form here belongs to another site, so Latch left it alone.' };
+  }
+  const fields = frame.fields.filter(x => frame.reset.pw.includes(x.ref));
+  const owner = ownerOf(ctx.vault, frame.host);
+  let password = null;
+  let source = 'latch';
+  if (ctx.meta.settings.newPasswords === 'mine') {
+    const cred = await credentialFor(ctx, frame.host, frame.actions?.[fields[0]?.form] || '', { use: 'main' });
+    if (cred.blocked) return cred.blocked;
+    if (fits(cred.password, fields)) { password = cred.password; source = 'main'; }
+  }
+  if (!password) {
+    password = generatePassword(fields);
+    if (!fits(password, fields)) password = generatePassword(fields, true);
+  }
+  const previous = ctx.vault.sites[owner] ? structuredClone(ctx.vault.sites[owner]) : null;
+  // Saved before it goes into the page, so an interruption never loses the new password.
+  await updateVault(v => {
+    const s = v.sites[owner] || { username: v.identity.email, createdAt: now() };
+    v.sites[owner] = { ...s, password: source === 'latch' ? password : null, source, pendingMain: source === 'main',
+      previousPassword: s.password || null, status: 'active', recovery: null, resetAt: now(), lastUsed: now() };
+  });
+  const before = signature(snap);
+  const r = await inFrame(tabId, frame.frameId, 'fillResetAndSubmit', { refs: frame.reset.pw, value: password, expectedUrl: frame.url });
+  const restore = () => updateVault(v => { if (previous) v.sites[owner] = previous; else delete v.sites[owner]; });
+  if (!r?.ok) {
+    if (!r?.filled) await restore();
+    await clearAll(tabId);
+    return changedUnderneath(frame.host, 'set_new_password');
+  }
+  const after = await stepAnswered(tabId, before, snap => snap.find(f => f.reset), 20000);
+  const again = after.find(f => f.reset);
+  const shown = pickFrame(after);
+  if (again && (again.error || shown?.error) && !flagged(after, 'resetDone')) {
+    // The form is still there with an error: the site kept the old password.
+    await restore();
+    await clearAll(tabId);
+    return { status: 'reset_failed', site: frame.host, message: `The site did not accept the new password.${siteSaid(again.error || shown.error)}` };
+  }
+  await clearAll(tabId);
+  return { status: 'password_reset', site: owner,
+    message: 'Set a new password and saved it in Latch. If the site asks you to sign in, call sign_in.' };
+}
+
+const FLOWS = { sign_in: signIn, create_account: createAccount, verify_email: verifyEmail, fill_email: fillEmail, request_password_recovery: requestPasswordRecovery,
+  setup_two_factor: setupTwoFactor, set_new_password: setNewPassword };
 
 // Tools that drive Chrome over DevTools know a tab by its address, not by its extension tab ID.
 async function resolveTab({ tabId, url } = {}) {
@@ -1207,6 +1453,7 @@ async function applicationTool(args, job) {
   try { origin = new URL(current?.url || '').origin; } catch {}
   if (origin !== expectedOrigin) return { status: 'blocked', tabId: tab.id, message: 'The tab origin does not match the requested origin.' };
   if (args.operation === 'organize') {
+    if (!chrome.tabGroups) return { status: 'unavailable', tabId: tab.id, message: 'This build of Latch does not organize tabs.' };
     beforeAction();
     // Finished applications wait together for the user; everything else is work in progress.
     const [title, color] = args.ready ? ['Ready to submit', 'green'] : ['Applications', 'grey'];
@@ -1274,7 +1521,7 @@ async function runTool(tool, args, client = '', job = null) {
       const asleep = tab?.frozen || tab?.discarded;
       if (asleep) tab = null;
       result = tab
-        ? await FLOWS[tool]({ tab, tabId: tab.id, vault, meta, verified: false })
+        ? await FLOWS[tool]({ tab, tabId: tab.id, vault, meta, verified: false, client })
         : { status: 'error', message: asleep ? 'Chrome has put that tab to sleep, so nothing was done in it. Open the page again.' : !Number.isInteger(args.tabId) && args.url
           ? 'No open tab shows that address. Pass the tab\'s current URL or its tabId.'
           : 'That tab does not exist. Pass the tabId from your browser tools.' };
@@ -1314,7 +1561,7 @@ async function runTool(tool, args, client = '', job = null) {
     account_created: 'inspect_page', check_inbox: 'verify_email', verification_pending: 'verify_email',
     needs_user: 'inspect_required_step', form_incomplete: 'complete_noncredential_fields',
     wrong_password: 'stop_retries', sign_in_failed: 'inspect_page', unconfirmed: 'inspect_page', no_form: 'inspect_page',
-    outcome_unknown: 'inspect_page' })[result.status];
+    outcome_unknown: 'inspect_page', two_factor_saved: 'continue', password_reset: 'sign_in', reset_failed: 'inspect_page' })[result.status];
   result.timings = { scope: 'tool_call', total_ms: now() - started, detection_ms: observation.detection_ms, fill_submit_ms: observation.fill_submit_ms,
     page_wait_ms: observation.page_wait_ms, verification_ms: observation.verification_ms };
   observation = null;
@@ -1436,7 +1683,9 @@ async function popupState() {
     settings: meta.settings,
     activity: meta.activity.slice(0, 20),
     sites: Object.entries(vault.sites)
-      .map(([host, s]) => ({ host, source: s.source, createdAt: s.createdAt, lastUsed: s.lastUsed, status: s.status, verified: !!s.verified, hasPassword: !!s.password }))
+      .map(([host, s]) => ({ host, source: s.source, createdAt: s.createdAt, lastUsed: s.lastUsed, status: s.status, verified: !!s.verified,
+        hasPassword: !!s.password, username: s.username && s.username !== vault.identity?.email ? s.username : '',
+        totp: !!s.totp, totpVerified: !!s.totp?.verified, issuer: s.totp?.issuer || '' }))
       .sort((a, b) => (b.lastUsed || b.createdAt || 0) - (a.lastUsed || a.createdAt || 0)),
     resets: Object.entries(vault.sites)
       .filter(([, s]) => s.recovery || s.pendingMain)
@@ -1444,30 +1693,228 @@ async function popupState() {
       .sort((a, b) => Math.max(b.requestedAt || 0, b.openedAt || 0, b.resetAt || 0) - Math.max(a.requestedAt || 0, a.openedAt || 0, a.resetAt || 0)),
     connected: connected(),
     clients: bridge.clients,
+    version: chrome.runtime.getManifest().version,
   };
 }
 
+// What a tab offers, read without filling anything.
+async function describePage(tab, vault) {
+  if (!tab || !/^https?:/.test(tab.url || '')) return { kind: 'blank', host: '' };
+  const snap = await snapshot(tab.id, { observe: false });
+  const resetFrame = snap.find(f => f.reset);
+  const setupFrame = snap.find(f => f.totpSetup);
+  const frame = resetFrame || setupFrame || pickFrame(snap);
+  const st = stateOf(frame);
+  const host = frame?.host || hostOf(tab.url);
+  const flags = frame?.flags || {};
+  const key = !!totpFor(vault, host);
+  let kind = 'none';
+  if (resetFrame) kind = 'reset';
+  else if (setupFrame) kind = 'totp_setup';
+  else if (st === 'captcha') kind = 'captcha';
+  else if (st === 'code') {
+    if ((flags.appCode && !flags.emailCode) || (key && !flags.emailCode && !flags.phoneCode)) kind = 'totp';
+    else kind = flags.phoneCode && !flags.emailCode ? 'phone_code' : 'code';
+  } else if (frame?.recovery && frame.top && st === 'identifier') kind = 'recovery';
+  else if (frame?.auth?.login && st !== 'none') kind = 'sign_in';
+  else if (frame?.auth?.signup && st !== 'none') kind = 'sign_up';
+  else if (snap.some(f => f.recovery && f.top)) kind = 'recovery';
+  else if (flagged(snap, 'checkEmail')) kind = 'check_email';
+  else if (flagged(snap, 'signedIn')) kind = 'signed_in';
+  return { kind, host, saved: !!siteFor(vault, host)?.password, known: knownSite(vault, host), totp: key, pendingReset: !!recoverySite(vault, host) };
+}
+
+// ---------- the on-page bar
+
+const BAR_LABELS = {
+  sign_in: 'Sign in with Latch', create_account: 'Create account with Latch', code: 'Enter code with Latch', totp: 'Enter 2FA code with Latch',
+  totp_setup: 'Set up 2FA with Latch', reset: 'Set new password with Latch', recovery: 'Send reset email with Latch', setup: 'Set up Latch',
+};
+const BAR_TOOLS = { sign_in: 'sign_in', create_account: 'create_account', code: 'verify_email', totp: 'verify_email', totp_setup: 'setup_two_factor',
+  reset: 'set_new_password', recovery: 'request_password_recovery' };
+const BUSY_TEXT = { sign_in: 'Signing in…', create_account: 'Creating the account…', code: 'Entering the code…', totp: 'Entering the 2FA code…',
+  totp_setup: 'Saving the 2FA key…', reset: 'Setting a new password…', recovery: 'Asking for a reset email…' };
+const TOOL_LABELS = { sign_in: BAR_LABELS.sign_in, create_account: BAR_LABELS.create_account, verify_email: BAR_LABELS.code,
+  set_new_password: BAR_LABELS.reset, request_password_recovery: BAR_LABELS.recovery, setup_two_factor: BAR_LABELS.totp_setup };
+const AI = 'AI assistants: ';
+
+// Results are written for tool callers; on the page the tools are buttons.
+function forPage(text) {
+  const tools = Object.keys(TOOL_LABELS).join('|');
+  return String(text || '')
+    .replace(/use fill_email to fill its email field without submitting it/g, 'fill its email field directly')
+    .replace(new RegExp(`\\b(?:call|use) (${tools})\\b`, 'g'), (_, t) => `press "${TOOL_LABELS[t]}"`)
+    .replace(new RegExp(`\\b(${tools})\\b`, 'g'), (_, t) => `"${TOOL_LABELS[t]}"`);
+}
+
+const GOOD = new Set(['signed_in', 'account_created', 'verified', 'filled', 'two_factor_saved', 'password_reset']);
+const WAITING = new Set(['needs_user', 'check_inbox', 'verification_pending', 'unconfirmed', 'retry_blocked', 'expired', 'outcome_unknown',
+  'no_form', 'account_exists', 'no_account', 'form_incomplete', 'paused']);
+const toneOf = r => (GOOD.has(r.status) ? 'good' : WAITING.has(r.status) ? 'wait' : 'bad');
+
+const offer = (action, host, note, agent) => ({ host, action, label: BAR_LABELS[action], note, agent });
+const press = action => `press "${BAR_LABELS[action]}"`;
+
+async function barModel(tab) {
+  const vault = await readVault().catch(() => emptyVault());
+  if (!vault.identity) {
+    return offer('setup', hostOf(tab.url), 'Latch can sign in on pages like this once you add your email and password.',
+      `${AI}Latch is installed but not set up. Ask the user to press "Set up Latch"; it takes under a minute.`);
+  }
+  const page = await describePage(tab, vault);
+  const h = page.host;
+  const inbox = !!vault.mailbox && connected();
+  const webmail = !inbox && ['code', 'check_email'].includes(page.kind) ? await webmailFor(vault.identity.email).catch(() => '') : '';
+  switch (page.kind) {
+    case 'sign_in':
+      return offer('sign_in', h, page.saved ? `Latch has your account for ${h}.` : 'Latch signs in with your email and password.',
+        `${AI}${press('sign_in')} instead of typing an email or password. Latch fills them privately and reports the result here.`);
+    case 'sign_up':
+      return offer('create_account', h, 'Latch creates the account with your email and a new strong password.',
+        `${AI}fill in the other fields first and leave email and password empty, then ${press('create_account')}.`);
+    case 'totp':
+      return page.totp
+        ? offer('totp', h, `Latch has the 2FA key for ${h}.`, `${AI}${press('totp')} to fill the authenticator code.`)
+        : { host: h, note: `${h} wants a code from an authenticator app, and Latch has no 2FA key for this site.`,
+          agent: `${AI}ask the user for the code from their authenticator app.` };
+    case 'phone_code':
+      return { host: h, note: `${h} sent a code to your phone.`, agent: `${AI}ask the user for the code sent to their phone.` };
+    case 'code':
+      return inbox
+        ? offer('code', h, 'Latch reads the emailed code from your inbox and enters it.', `${AI}${press('code')}.`)
+        : { host: h, note: `${h} emailed a code.`, linkUrl: webmail, linkLabel: 'Open inbox',
+          agent: `${AI}open the user's inbox, read the newest email from ${h}, and type its code here. Latch is not connected to the inbox.` };
+    case 'check_email':
+      return { host: h, note: `${h} emailed a link.`, linkUrl: webmail, linkLabel: 'Open inbox',
+        agent: `${AI}open the user's inbox and open the link in the newest email from ${h}.` };
+    case 'totp_setup':
+      return offer('totp_setup', h, 'Latch can keep this site\'s 2FA key and enter its codes for you.', `${AI}${press('totp_setup')} to save the key and confirm it with a code.`);
+    case 'reset':
+      return offer('reset', h, 'Latch chooses a strong new password, enters it and saves it.', `${AI}${press('reset')}. Do not type a password yourself.`);
+    case 'recovery':
+      return offer('recovery', h, 'Latch enters your email address and asks for a reset link.',
+        `${AI}${press('recovery')}, then open the reset link from the newest email in the user's inbox.`);
+    case 'captcha':
+      return { host: h, note: 'This page shows a CAPTCHA.', agent: `${AI}ask the user to solve the CAPTCHA, then continue.` };
+    default:
+      return null;
+  }
+}
+
+const bars = new Map();       // tabId -> { frames: Map(frameId -> probe), timer, model, busy, busyModel, presses }
+const barResults = new Map(); // tabId -> the last result of a flow the bar ran, shown for a while
+const RESULT_MS = 30000;
+let barSeq = 0;
+
+function barEntry(tabId) {
+  let entry = bars.get(tabId);
+  if (!entry) bars.set(tabId, entry = { frames: new Map(), timer: null, model: null, busy: false, busyModel: null, presses: [] });
+  return entry;
+}
+
+chrome.tabs.onRemoved.addListener(tabId => { bars.delete(tabId); barResults.delete(tabId); });
+chrome.tabs.onUpdated.addListener((tabId, info) => {
+  if (info.status === 'loading' && bars.has(tabId)) bars.get(tabId).frames.clear();
+});
+
+function scheduleBar(tabId, ms = 250) {
+  const entry = barEntry(tabId);
+  clearTimeout(entry.timer);
+  entry.timer = setTimeout(() => evaluateBar(tabId).catch(() => {}), ms);
+}
+
+function onProbe(sender, sig) {
+  const tabId = sender.tab?.id;
+  if (!Number.isInteger(tabId) || !Number.isInteger(sender.frameId)) return;
+  const entry = barEntry(tabId);
+  entry.frames.set(sender.frameId, typeof sig === 'string' ? sig.slice(0, 40) : '');
+  if (entry.frames.size > 200) entry.frames.delete(entry.frames.keys().next().value);
+  scheduleBar(tabId);
+}
+
+function pushBar(tab, model) {
+  let origin = '';
+  try { origin = new URL(tab.url).origin; } catch {}
+  chrome.tabs.sendMessage(tab.id, { type: 'bar:state', model, origin }, { frameId: 0 }).catch(() => {});
+}
+
+async function evaluateBar(tabId) {
+  const entry = bars.get(tabId);
+  const tab = entry && await chrome.tabs.get(tabId).catch(() => null);
+  if (!tab || !/^https?:/.test(tab.url || '')) return;
+  if (entry.busy) return pushBar(tab, entry.busyModel);
+  const { settings } = await getMeta();
+  let model = null;
+  if (!settings.paused && settings.bar !== false && [...entry.frames.values()].some(Boolean)) model = await barModel(tab).catch(() => null);
+  const done = barResults.get(tabId);
+  if (done && now() - done.at < RESULT_MS && baseDomain(done.host) === baseDomain(hostOf(tab.url))) {
+    model = { host: hostOf(tab.url), ...(model || {}), status: done.text, tone: done.tone };
+    if (!model.action && !model.linkUrl && done.linkUrl) Object.assign(model, { linkUrl: done.linkUrl, linkLabel: 'Open inbox' });
+  }
+  entry.model = model;
+  pushBar(tab, model);
+}
+
+// Progress for a flow the bar started, shown while it runs.
+function barProgress(tabId, text) {
+  const entry = bars.get(tabId);
+  if (!entry?.busy) return;
+  entry.busyModel = { ...entry.busyModel, status: text, tone: 'wait' };
+  chrome.tabs.get(tabId).then(tab => pushBar(tab, entry.busyModel)).catch(() => {});
+}
+
+// A press on the bar's button. The content script has already checked that it was a
+// trusted input event on an unobscured, untampered bar; this checks it against what
+// Latch is offering on that tab right now.
+async function barAct(sender, action) {
+  const tabId = sender.tab?.id;
+  if (!Number.isInteger(tabId) || sender.frameId !== 0) return { ok: false };
+  const entry = barEntry(tabId);
+  if (!entry.model && !entry.busy) {
+    // Chrome stops an idle worker and its memory goes with it, so after a long look at the
+    // page this works out again what the page offers before trusting the press.
+    const [tab, { settings }] = await Promise.all([chrome.tabs.get(tabId).catch(() => null), getMeta()]);
+    entry.frames.set(0, entry.frames.get(0) || 'press');
+    if (tab && !settings.paused && settings.bar !== false) entry.model = await barModel(tab).catch(() => null);
+  }
+  if (!entry.model?.action || entry.model.action !== action) return { ok: false, message: 'Latch no longer offers that on this page. Wait a moment, then look at the page again.' };
+  if (entry.busy) return { ok: false, message: 'Latch is already working on this page.' };
+  entry.presses = entry.presses.filter(t => now() - t < 60000);
+  if (entry.presses.length >= 6) return { ok: false, message: 'Latch was pressed many times in a row here, so it is waiting a minute before trying again.' };
+  entry.presses.push(now());
+  if (action === 'setup') {
+    await chrome.tabs.create({ url: chrome.runtime.getURL('app.html#welcome'), index: (sender.tab.index ?? 0) + 1 });
+    return { ok: true };
+  }
+  const tool = BAR_TOOLS[action];
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  if (!tool || !tab || hostOf(tab.url) !== hostOf(sender.url || '')) return { ok: false, message: 'The page changed. Press again.' };
+  entry.busy = true;
+  entry.busyModel = { ...entry.model, busy: true, status: BUSY_TEXT[action], tone: 'wait' };
+  barResults.delete(tabId);
+  pushBar(tab, entry.busyModel);
+  const job = { id: `page-${++barSeq}`, ws: null, deadline: now() + 240000, cancelled: false, acted: false };
+  enqueue(() => runTool(tool, { tabId, url: tab.url }, 'page', job)).then(result => {
+    entry.busy = false;
+    barResults.set(tabId, { at: now(), host: result.site || hostOf(tab.url), text: forPage(result.message), tone: toneOf(result), linkUrl: result.inbox || '' });
+    scheduleBar(tabId, 700);
+    setTimeout(() => scheduleBar(tabId, 0), RESULT_MS + 500);
+  }, () => { entry.busy = false; scheduleBar(tabId, 0); });
+  return { ok: true };
+}
+
+// ---------- extension pages (popup, Latch app, approval window)
+
+const normalizeHost = input => {
+  const text = String(input || '').trim().toLowerCase();
+  try { return new URL(/^[a-z]+:\/\//.test(text) ? text : `https://${text}`).hostname; } catch { return ''; }
+};
+
 const popupHandlers = {
   state: () => popupState(),
-  // What the page in front of the user offers, read without filling anything.
   pageState: async () => {
     const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-    if (!tab || !/^https?:/.test(tab.url || '')) return { kind: 'blank', host: '' };
-    const snap = await snapshot(tab.id, { observe: false });
-    const resetFrame = snap.find(f => f.reset);
-    const frame = resetFrame || pickFrame(snap);
-    const st = stateOf(frame);
-    const host = frame?.host || hostOf(tab.url);
-    const vault = await readVault().catch(() => emptyVault());
-    let kind = 'none';
-    if (resetFrame) kind = 'reset';
-    else if (st === 'captcha') kind = 'captcha';
-    else if (st === 'code') kind = 'code';
-    else if (frame?.auth?.login && st !== 'none') kind = 'sign_in';
-    else if (frame?.auth?.signup && st !== 'none') kind = 'sign_up';
-    else if (flagged(snap, 'checkEmail')) kind = 'check_email';
-    else if (flagged(snap, 'signedIn')) kind = 'signed_in';
-    return { kind, host, saved: !!siteFor(vault, host)?.password, pendingReset: !!siteFor(vault, host)?.recovery };
+    return describePage(tab, await readVault().catch(() => emptyVault()));
   },
   // Password resets are the user's action: these run only from the popup, never from a bridge call.
   fillReset: () => fillResetHere(),
@@ -1481,11 +1928,59 @@ const popupHandlers = {
   },
   // The user runs a flow on the tab in front of them, exactly as the AI would.
   runHere: async ({ tool }) => {
-    if (!['sign_in', 'create_account', 'verify_email'].includes(tool)) return { status: 'error', message: 'Unknown action.' };
+    if (!['sign_in', 'create_account', 'verify_email', 'set_new_password', 'setup_two_factor', 'request_password_recovery'].includes(tool)) {
+      return { status: 'error', message: 'Unknown action.' };
+    }
     const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
     if (!tab || !/^https?:/.test(tab.url || '')) return { status: 'error', message: 'Open the site\'s page first.' };
-    return enqueue(() => runTool(tool, { tabId: tab.id }, 'you'));
+    const job = { id: `you-${++barSeq}`, ws: null, deadline: now() + 120000, cancelled: false, acted: false };
+    const result = await enqueue(() => runTool(tool, { tabId: tab.id, url: tab.url }, 'you', job));
+    return { ...result, message: forPage(result.message) };
   },
+  codes: async () => {
+    const vault = await readVault();
+    const out = [];
+    for (const [host, s] of Object.entries(vault.sites)) {
+      if (!s.totp) continue;
+      out.push({ host, issuer: s.totp.issuer || '', verified: !!s.totp.verified, code: await totp(s.totp), left: secondsLeft(s.totp), period: s.totp.period || 30 });
+    }
+    return out.sort((a, b) => a.host.localeCompare(b.host));
+  },
+  addTotp: async ({ host, key }) => {
+    const site = normalizeHost(host);
+    const parsed = parseKey(key);
+    if (!site || !site.includes('.')) return { ok: false, reason: 'host' };
+    if (!parsed) return { ok: false, reason: 'key' };
+    await updateVault(v => {
+      if (!v.identity) throw new Error('not set up');
+      v.sites[site] ||= { username: v.identity.email, password: null, source: 'main', createdAt: now(), status: 'active' };
+      v.sites[site].totp = { secret: parsed.secret, digits: parsed.digits, period: parsed.period, algorithm: parsed.algorithm, issuer: parsed.issuer, addedAt: now(), verified: false };
+    });
+    return { ok: true, host: site };
+  },
+  removeTotp: async ({ host }) => {
+    await updateVault(v => { if (v.sites[String(host || '')]) delete v.sites[String(host)].totp; });
+    return { ok: true };
+  },
+  saveSite: async ({ host, username, password }) => {
+    const site = normalizeHost(host);
+    if (!site || !site.includes('.') || typeof password !== 'string' || !password) return { ok: false };
+    await updateVault(v => {
+      if (!v.identity) throw new Error('not set up');
+      const s = v.sites[site] || { createdAt: now() };
+      v.sites[site] = { ...s, username: String(username || '').trim() || v.identity.email, password, source: 'you', status: 'active', pendingMain: false };
+    });
+    return { ok: true, host: site };
+  },
+  'approval:get': ({ id }) => {
+    const a = approvals.get(String(id || ''));
+    return a ? { host: a.host, base: baseDomain(a.host) } : { gone: true };
+  },
+  'approval:answer': ({ id, answer }) => {
+    approvals.get(String(id || ''))?.resolve(answer === 'allow' ? 'allow' : 'deny');
+    return { ok: true };
+  },
+  'approval:ping': () => ({ ok: true }),
   connect: () => { connect(); return {}; },
   provider: ({ email }) => detectProvider(email),
   saveIdentity: async ({ email, password }) => {
@@ -1511,7 +2006,10 @@ const popupHandlers = {
   removeMailbox: async () => { await updateVault(v => { v.mailbox = null; }); return { ok: true }; },
   settings: async ({ patch }) => {
     const { settings } = await getMeta();
-    await chrome.storage.local.set({ settings: { ...settings, ...patch } });
+    const allowed = ['paused', 'newPasswords', 'confirmNewSites', 'bar', 'approvedSites'];
+    const clean = Object.fromEntries(Object.entries(patch || {}).filter(([k]) => allowed.includes(k)));
+    await chrome.storage.local.set({ settings: { ...settings, ...clean } });
+    refreshBars();
     return { ok: true };
   },
   reveal: async ({ host }) => ({ password: (await readVault()).sites[host]?.password || '' }),
@@ -1527,15 +2025,49 @@ const popupHandlers = {
   },
 };
 
+// After these, what the bar offers on open pages may have changed.
+const CHANGES_BARS = new Set(['saveIdentity', 'addTotp', 'removeTotp', 'saveSite', 'forget', 'erase', 'saveMailbox', 'removeMailbox']);
+const refreshBars = () => { for (const tabId of bars.keys()) scheduleBar(tabId, 0); };
+
 chrome.runtime.onMessage.addListener((msg, sender, reply) => {
-  const fromPopup = sender.id === chrome.runtime.id && sender.url?.startsWith(chrome.runtime.getURL(''));
-  const handler = fromPopup && popupHandlers[msg?.type];
-  if (!handler) return false;
-  Promise.resolve(handler(msg)).then(reply, () => reply({ ok: false, error: true }));
-  return true;
+  if (sender.id !== chrome.runtime.id || typeof msg?.type !== 'string') return false;
+  if (sender.url?.startsWith(chrome.runtime.getURL(''))) {
+    const handler = Object.hasOwn(popupHandlers, msg.type) && popupHandlers[msg.type];
+    if (!handler) return false;
+    Promise.resolve(handler(msg)).then(r => { if (CHANGES_BARS.has(msg.type)) refreshBars(); reply(r); }, () => reply({ ok: false, error: true }));
+    return true;
+  }
+  // Content scripts: the bar's probe and its button.
+  if (!sender.tab) return false;
+  if (msg.type === 'bar:probe') { onProbe(sender, msg.sig); return false; }
+  if (msg.type === 'bar:act') {
+    barAct(sender, String(msg.action || '')).then(reply, () => reply({ ok: false }));
+    return true;
+  }
+  return false;
 });
 
 function notifyPopup() {
   chrome.runtime.sendMessage({ type: 'changed' }).catch(() => {});
 }
 
+// The approval window keeps the worker awake while the user decides.
+chrome.runtime.onConnect.addListener(port => {
+  if (port.name !== 'approval' || !port.sender?.url?.startsWith(chrome.runtime.getURL(''))) return;
+  port.onMessage.addListener(() => {});
+});
+
+chrome.runtime.onInstalled.addListener(async ({ reason }) => {
+  const vault = await readVault().catch(() => emptyVault());
+  if (reason === 'install' && !vault.identity) chrome.tabs.create({ url: chrome.runtime.getURL('app.html#welcome') }).catch(() => {});
+  if (reason === 'update') {
+    // Earlier versions never asked before using the main password; keep that for existing setups.
+    const { settings = {} } = await chrome.storage.local.get('settings');
+    if (vault.identity && !('confirmNewSites' in settings)) await chrome.storage.local.set({ settings: { ...settings, confirmNewSites: false } });
+  }
+  // Pages that were already open get the bar without a reload.
+  const tabs = await chrome.tabs.query({ url: ['http://*/*', 'https://*/*'] }).catch(() => []);
+  for (const tab of tabs) {
+    if (!tab.discarded && !tab.frozen) chrome.scripting.executeScript({ target: { tabId: tab.id, allFrames: true }, files: ['bar.js'] }).catch(() => {});
+  }
+});

@@ -1,6 +1,7 @@
 globalThis.__jobApplyScan = (
 () => {
   const vis = (el) => {
+    if (el?.closest?.("latch-bar")) return false;
     if (!el || !el.isConnected) return false;
     const st = getComputedStyle(el);
     if (st.display === 'none' || st.visibility === 'hidden') return false;
