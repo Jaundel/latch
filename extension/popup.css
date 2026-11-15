@@ -16,7 +16,7 @@ main { padding: 14px 16px 16px; }
 .page-host { font-size: 12px; color: var(--fg-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .page-title { font-weight: 650; font-size: 14.5px; letter-spacing: -.01em; }
 .page-sub { margin: 0 0 12px; color: var(--fg-2); }
-.page.loading .page-title { color: var(--fg-3); }
+.page.loading .page-title { color: var(--fg-2); }
 
 .setup h1 { font-size: 19px; margin: 6px 0 6px; letter-spacing: -.02em; }
 .setup p { margin: 0 0 14px; color: var(--fg-2); }
@@ -28,7 +28,7 @@ main { padding: 14px 16px 16px; }
 .twofa .label { font-size: 12px; color: var(--fg-2); }
 
 .section-head { display: flex; align-items: center; justify-content: space-between; margin: 18px 0 4px; }
-.section-head h2 { margin: 0; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--fg-3); font-weight: 700; }
+.section-head h2 { margin: 0; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--fg-2); font-weight: 700; }
 .empty { color: var(--fg-2); margin: 6px 0 0; font-size: 13px; }
 
 .act { grid-template-columns: auto 1fr; }

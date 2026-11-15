@@ -26,7 +26,7 @@
     "store-assets": "node store/make-assets.mjs",
     "test": "npm run test:unit && npm run test:extension && node test/e2e.mjs",
     "test:unit": "node --test test/page.mjs test/domains.mjs test/auth-result.mjs test/guard.mjs test/frames.mjs test/private-focus.mjs test/cgi-account.mjs test/popup.mjs test/mail.mjs test/totp.mjs",
-    "test:extension": "node --test --test-concurrency=1 test/bar.mjs && node test/bridge.mjs && node test/loading.mjs",
+    "test:extension": "node --test --test-concurrency=1 test/bar.mjs test/a11y.mjs && node test/bridge.mjs && node test/loading.mjs",
     "test:page": "node --test test/page.mjs"
   },
   "dependencies": {
@@ -37,6 +37,7 @@
     "zod": "4.6.7"
   },
   "devDependencies": {
+    "axe-core": "^4.10.3",
     "jsqr": "1.4.0",
     "playwright": "1.64.1",
     "qrcode": "1.5.4"

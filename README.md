@@ -32,7 +32,7 @@ The toolbar popup shows what the current page offers, the 2FA code for the site,
 - The panel's buttons only respond to trusted input events (real clicks and key presses, which page scripts cannot fake), and only while the panel is visible, uncovered and unchanged.
 - Accounts Latch creates get unique random passwords. Everything is encrypted with AES-256-GCM under a non-exportable key and stays in your browser profile. There are no servers, analytics or remote code.
 
-[SECURITY.md](SECURITY.md) has the full design and its limits. The [privacy policy](https://jaundel.github.io/latch/privacy.html) covers what is stored and what leaves your computer.
+[SECURITY.md](SECURITY.md) has the full design and its limits, and [AUDIT.md](AUDIT.md) lists what was checked before release (accessibility, UX and an independent security review). The [privacy policy](https://jaundel.github.io/latch/privacy.html) covers what is stored and what leaves your computer.
 
 ## Install
 

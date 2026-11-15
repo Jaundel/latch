@@ -101,10 +101,15 @@
   // ---------- the bar (top frame only)
 
   const CSS = `
-    :host { all: initial; }
-    .bar {
+    /* The host carries the panel's colours too, so tools that cannot see into the closed
+       shadow root (screen-reader and contrast checkers) still find the real background. */
+    :host {
+      all: initial;
       --bg: #ffffff; --fg: #16161a; --fg2: #5d5d66; --line: rgba(22,22,26,.10); --btn: #16161a; --btnfg: #ffffff;
       --good: #18794e; --bad: #c0352b; --wait: #8a5a00; --ring: #3b6ef5; --brass: #e2a336;
+      background: var(--bg) !important; color: var(--fg) !important; border-radius: 14px !important;
+    }
+    .bar {
       box-sizing: border-box; display: grid; grid-template-columns: 28px 1fr auto; gap: 4px 10px; align-items: center;
       width: min(372px, calc(100vw - 24px)); padding: 12px 12px 12px 12px; border-radius: 14px;
       background: var(--bg); color: var(--fg); border: 1px solid var(--line);
@@ -113,7 +118,7 @@
       -webkit-font-smoothing: antialiased; text-align: left; direction: ltr;
     }
     @media (prefers-color-scheme: dark) {
-      .bar { --bg: #1b1b1e; --fg: #ececef; --fg2: #a3a3ab; --line: rgba(255,255,255,.12); --btn: #ececef; --btnfg: #161618;
+      :host { --bg: #1b1b1e; --fg: #ececef; --fg2: #a3a3ab; --line: rgba(255,255,255,.12); --btn: #ececef; --btnfg: #161618;
         --good: #5fd39a; --bad: #f27b72; --wait: #f1b45a; --ring: #7b9cff; }
     }
     .logo { width: 28px; height: 28px; display: block; }
@@ -170,7 +175,7 @@
     host.setAttribute('data-latch', '');
     // Undo the browser's popover box so only the shadow bar draws.
     host.style.cssText = 'all: initial !important; position: fixed !important; inset: 12px 12px auto auto !important; margin: 0 !important;' +
-      'padding: 0 !important; border: 0 !important; background: transparent !important; overflow: visible !important; display: block !important;' +
+      'padding: 0 !important; border: 0 !important; overflow: visible !important; display: block !important;' +
       'width: auto !important; height: auto !important; z-index: 2147483647 !important; color-scheme: light dark !important;';
     const root = host.attachShadow({ mode: 'closed' });
     root.innerHTML = `<style>${CSS}</style><div class="bar">${LOGO}<div class="head"><slot name="title"></slot><slot name="host"></slot></div>` +
