@@ -472,7 +472,9 @@ export async function startSites({ main, mailbox, live = false, port = 0 }) {
         state.passwords.set(site, b.password);
         state.secrets.add(t);
         mailbox.add({
-          from: 'CIBC <cibc@myworkday.localhost>', to: b.email, subject: 'Verify your candidate account',
+          // Real Workday mails from myworkday.com for *.myworkdayjobs.com pages; test/mail.mjs covers that
+          // vendor match. These made-up hosts are not a known job portal, so the sender shares the page's domain.
+          from: 'CIBC <cibc@workday.localhost>', to: b.email, subject: 'Verify your candidate account',
           html: `<p>Please verify your account.</p><p><a href="${origin(site)}/verify?token=${t}">Verify Account</a></p>`, text: 'Verify your account in the HTML version.',
         });
         return json(res, { ok: true });
