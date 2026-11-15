@@ -27,18 +27,21 @@ export function startWorker({ code, disk, storage, event = null, extensionId }) 
   const worker = new Worker(new URL(import.meta.url), { workerData: { code, disk, storage, event, extensionId } });
   const fills = [];
   const opened = [];
+  let cleared = 0;
   const replies = new Map();
   let seq = 0;
   worker.on('message', msg => {
     if (msg.type === 'storage') Object.assign(storage[msg.area], msg.items);
     else if (msg.type === 'fill') fills.push(msg);
     else if (msg.type === 'opened') opened.push(msg.url);
+    else if (msg.type === 'clear') cleared++;
     else if (msg.type === 'reply') { replies.get(msg.id)?.(msg.result); replies.delete(msg.id); }
   });
   worker.on('error', err => console.error('worker:', err));
   return {
     fills,
     opened,
+    clears: () => cleared,
     popup: msg => new Promise(resolve => { const id = ++seq; replies.set(id, resolve); worker.postMessage({ type: 'popup', id, msg }); }),
     show: frame => worker.postMessage({ type: 'page', frame }),
     tab: patch => worker.postMessage({ type: 'tab', patch }),
@@ -87,7 +90,7 @@ if (!isMainThread) {
     fillOne: arg => fill('fillOne', arg),
     requestRecovery: arg => fill('requestRecovery', arg),
     fillReset: arg => fill('fillReset', arg),
-    clearFilled: () => ({ cleared: 0 }),
+    clearFilled: () => { parentPort.postMessage({ type: 'clear' }); return { cleared: 0 }; },
   };
   // These runs play an unattended AI, so no approval window is asked for.
   storage.local.settings = { confirmNewSites: false, ...storage.local.settings };

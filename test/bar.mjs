@@ -3,7 +3,7 @@
 // key and QR code), the forgot-password flow, and pages that try to misuse the bar.
 import assert from 'node:assert/strict';
 import { after, before, test } from 'node:test';
-import { cpSync, mkdtempSync, rmSync } from 'node:fs';
+import { cpSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -104,9 +104,16 @@ before(async () => {
     context.on('weberror', e => console.error('WEBERROR', e.error().message));
     context.on('page', pg => pg.on('console', m => { if (/latch|error/i.test(m.text())) console.error('PAGE', pg.url(), m.text()); }));
   }
+  // The published practice site, served from docs/demo exactly as it is on the web.
+  await context.route(/^https:\/\/practice\.test\//, route => {
+    const name = new URL(route.request().url()).pathname.split('/').pop() || 'index.html';
+    const type = { html: 'text/html', js: 'text/javascript', css: 'text/css', png: 'image/png' }[name.split('.').pop()];
+    return route.fulfill({ contentType: type, body: readFileSync(join(root, 'docs', 'demo', name)) });
+  });
   await context.route(/^https:\/\/[a-z]+\.test\//, async route => {
     const req = route.request();
     const u = new URL(req.url());
+    if (u.hostname === 'practice.test') return route.fallback();
     const body = req.method() === 'POST' ? Object.fromEntries(new URLSearchParams(req.postData() || '')) : {};
     if (req.method() === 'POST') posts.push({ host: u.hostname, path: u.pathname, body });
     const r = await site(u.hostname, u.pathname, req.method(), body);
@@ -303,6 +310,26 @@ test('forgot password: send the reset email, then set and save a new password', 
   await p.goto('https://reset.test/login');
   await press(p, 'Sign in with Latch');
   await p.waitForURL('https://reset.test/home', { timeout: 30000 });
+  await p.close();
+});
+
+test('the published practice site works end to end', async () => {
+  const p = await open('https://practice.test/demo/index.html');
+  await press(p, 'Sign in with Latch');
+  const win = await approvalWindow();
+  await win.waitForFunction(() => ![...document.querySelectorAll('button')].find(b => b.textContent === 'Allow').disabled);
+  await win.getByRole('button', { name: 'Allow', exact: true }).click();
+  await waitForStatus(p, /Signed in/);
+  assert.equal(await p.locator('#done').isVisible(), true);
+  await p.goto('https://practice.test/demo/2fa.html');
+  await press(p, 'Set up 2FA with Latch');
+  await waitForStatus(p, /Saved the 2FA key and confirmed it/);
+  await p.goto('https://practice.test/demo/forgot.html');
+  await press(p, 'Send reset email with Latch');
+  await waitForStatus(p, /Reset email requested/);
+  await p.goto('https://practice.test/demo/reset.html');
+  await press(p, 'Set new password with Latch');
+  await waitForStatus(p, /Set a new password and saved it/);
   await p.close();
 });
 

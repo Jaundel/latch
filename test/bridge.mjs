@@ -549,7 +549,7 @@ try {
       const held = await finish(conn, id, what);
       assert.equal(held.status, 'needs_user', what);
       assert.equal(held.reason, 'recovery_pending', what);
-      assert.equal(held.next_action, 'user_completes_reset', what);
+      assert.equal(held.next_action, 'open_reset_link', what);
     };
 
     await section('a rejected site password falls back to the main password once and the site moves to it', async () => {
@@ -615,7 +615,7 @@ try {
         callOn(conn, 'reset-sign-in', 'sign_in', Date.now() + 60000);
         const signIn = await finish(conn, 'reset-sign-in', 'sign_in on a reset page');
         assert.equal(signIn.status, 'reset_form');
-        assert.equal(signIn.next_action, 'user_completes_reset');
+        assert.equal(signIn.next_action, 'set_new_password');
         callOn(conn, 'reset-sign-up', 'create_account', Date.now() + 60000);
         assert.equal((await finish(conn, 'reset-sign-up', 'create_account on a reset page')).status, 'reset_form');
         assert.equal(worker.fills.length, start, 'no tool fills a reset page');
@@ -656,7 +656,7 @@ try {
         const result = await finish(conn, 'recover', 'the recovery result');
         assert.equal(result.status, 'needs_user');
         assert.equal(result.reason, 'recovery_requested');
-        assert.equal(result.next_action, 'user_completes_reset');
+        assert.equal(result.next_action, 'open_reset_link');
         const [reset] = (await worker.popup({ type: 'state' })).resets;
         assert.equal(reset.host, host);
         assert.ok(reset.requestedAt > 0);
@@ -1075,7 +1075,7 @@ try {
         worker.show(resetPage);
         const result = await finish(conn, 'email-then-reset', 'a reset form after the email step');
         assert.equal(result.status, 'reset_form');
-        assert.equal(result.next_action, 'user_completes_reset');
+        assert.equal(result.next_action, 'set_new_password');
         assert.equal(worker.fills.length, 1, 'nothing goes into the reset form');
         assert.equal(await siteState(worker), undefined, 'a generated password nobody used is not kept');
       });

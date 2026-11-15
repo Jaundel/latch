@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Latch privacy policy</title>
+  <meta name="description" content="What the Latch Chrome extension stores, what leaves your computer, and what your AI sees.">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'none'; base-uri 'none'; form-action 'none'">
+  <link rel="icon" href="img/icon-128.png">
+  <link rel="stylesheet" href="site.css">
+</head>
+<body>
+  <header class="top">
+    <div class="wrap">
+      <a class="brand" href="./">
+        <svg viewBox="0 0 28 28" aria-hidden="true"><rect width="28" height="28" rx="8" fill="#16161a"/><circle cx="14" cy="11.6" r="3.6" fill="#e2a336"/><path d="M12.4 13.4h3.2l1.1 7.4h-5.4z" fill="#e2a336"/></svg>
+        Latch
+      </a>
+    </div>
+  </header>
+  <main class="doc">
+    <h1>Privacy policy</h1>
+    <p>Last updated November 15, 2026. This policy covers the Latch Chrome extension and the optional Latch helper program.</p>
+    <p>Latch has no servers and no user accounts. We never receive your data. Everything below happens on your computer.</p>
+
+    <h2>What Latch stores</h2>
+    <ul>
+      <li>The email address and password you enter during setup.</li>
+      <li>Passwords Latch creates for new accounts or password resets, and passwords you save for particular sites, each with the site it belongs to.</li>
+      <li>Two-factor (authenticator) keys you add, or that Latch saves from a site's 2FA setup page when you or your AI ask it to.</li>
+      <li>Your settings, including the sites you have allowed Latch to use your password on.</li>
+      <li>An inbox app password, only if you connect the optional helper to your inbox.</li>
+      <li>A list of recent actions: the site, the outcome, who asked and when. It never contains passwords, codes or keys.</li>
+    </ul>
+    <p>This is kept in Chrome's storage for the extension, in your browser profile. Passwords, keys and the inbox password are encrypted with AES-256-GCM using a key that cannot be exported. Anything running as your user on the computer can still read Chrome's storage, so keep your computer account to yourself.</p>
+
+    <h2>What Latch reads on web pages</h2>
+    <p>Latch looks at the pages you visit to find sign-in, sign-up, verification, two-factor and password reset forms. It reads the structure of the form and the wording around it, not what you type. This happens in your browser; nothing about the pages you visit is recorded or sent anywhere. When you or your AI press a Latch button on a 2FA setup page that shows only a QR code, Latch takes one screenshot of that tab to read the code, and discards it.</p>
+
+    <h2>What leaves your computer</h2>
+    <ul>
+      <li>Your email and password go to the website being signed in to, and to no other site. Latch refuses pages that imitate other sites and forms that would send the password elsewhere, and asks you before your main password goes to a site for the first time.</li>
+      <li>If you connect an inbox through the optional helper, Latch signs in to your own mail server to read the one verification or reset email it needs. It does not change or delete anything.</li>
+      <li>During inbox setup, the helper looks up your email domain's public DNS records to suggest the right mail server.</li>
+    </ul>
+    <p>Nothing is sent to us or to any analytics, advertising or tracking service. Latch does not sell or share data, and does not use it for anything other than signing in and managing accounts for you.</p>
+
+    <h2>What your AI sees</h2>
+    <p>Your AI sees Latch's buttons and short results such as "Signed in". It never receives your email address, passwords, codes, keys or reset links from Latch. Two exceptions: when a site emails a code and the inbox helper isn't connected, your AI reads that one email in your webmail itself; and sites may show your email on their own pages after you sign in.</p>
+
+    <h2>Removing your data</h2>
+    <p>Settings &gt; Erase everything deletes all of it. Uninstalling the extension does too.</p>
+
+    <h2>Contact</h2>
+    <p>Questions about this policy: <a href="https://github.com/Jaundel/latch/issues">open an issue on GitHub</a>.</p>
+  </main>
+  <footer>
+    <div class="wrap"><span>Latch</span><span class="grow"></span><a href="./">Home</a><a href="https://github.com/Jaundel/latch">GitHub</a></div>
+  </footer>
+</body>
+</html>

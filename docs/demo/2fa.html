@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Set up two-factor authentication · Latch practice site</title>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; base-uri 'none'; form-action 'none'">
+  <link rel="stylesheet" href="demo.css">
+  <script src="demo.js" defer></script>
+</head>
+<body>
+  <div class="note">Latch practice site. Nothing you enter here leaves this page. <a href="../">Back to Latch</a></div>
+  <div class="nav"><i></i>Practice Co.</div>
+  <main>
+    <div class="card wide" id="setup">
+      <h1>Set up two-factor authentication</h1>
+      <p class="sub">Scan this QR code with your authenticator app, or press <b>Set up 2FA with Latch</b>.</p>
+      <div class="qr">
+        <img src="qr.png" width="150" height="150" alt="QR code for your authenticator app">
+        <p>Can't scan it? Enter this setup key:<br><code>jbsw y3dp ehpk 3pxp jbsw y3dp ehpk 3pxp</code></p>
+      </div>
+      <form id="totp" method="post">
+        <label>6-digit code from the app <input name="code" autocomplete="one-time-code" inputmode="numeric" required></label>
+        <div class="error" role="alert" id="totp-error"></div>
+        <button type="submit">Verify and turn on</button>
+      </form>
+    </div>
+    <div class="card" id="done" hidden>
+      <h1>Two-factor authentication is on</h1>
+      <p class="sub">Latch saved this practice site's key and confirmed it. Open the Latch popup on this page to see the current code.</p>
+    </div>
+  </main>
+</body>
+</html>

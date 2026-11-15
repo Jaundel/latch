@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Latch: let your AI sign in for you</title>
+  <meta name="description" content="Latch is a free Chrome extension that lets Claude, ChatGPT and other browser AIs sign in, create accounts, pass 2FA and reset passwords without ever seeing your password.">
+  <meta property="og:title" content="Latch: let your AI sign in for you">
+  <meta property="og:description" content="Your AI presses Sign in with Latch. It never sees your password.">
+  <meta property="og:image" content="https://jaundel.github.io/latch/img/og.png">
+  <meta property="og:type" content="website">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'none'; base-uri 'none'; form-action 'none'">
+  <link rel="icon" href="img/icon-128.png">
+  <link rel="stylesheet" href="site.css">
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="top">
+    <div class="wrap">
+      <a class="brand" href="./" aria-label="Latch home">
+        <svg viewBox="0 0 28 28" aria-hidden="true"><rect width="28" height="28" rx="8" fill="#16161a"/><circle cx="14" cy="11.6" r="3.6" fill="#e2a336"/><path d="M12.4 13.4h3.2l1.1 7.4h-5.4z" fill="#e2a336"/></svg>
+        Latch
+      </a>
+      <nav class="links" aria-label="Site">
+        <a href="#how">How it works</a>
+        <a href="#security">Security</a>
+        <a href="#faq">FAQ</a>
+        <a href="https://github.com/Jaundel/latch">GitHub</a>
+        <a class="btn primary small" href="#install">Add to Chrome</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main">
+    <section class="hero">
+      <div class="wrap">
+        <div>
+          <span class="eyebrow">Free Chrome extension · open source</span>
+          <h1>Let your AI sign in for you.</h1>
+          <p class="lede">Latch lets Claude, ChatGPT and other AIs that browse for you sign in, create accounts, pass two-factor checks and reset forgotten passwords. They never see your password.</p>
+          <div class="ctas">
+            <a class="btn primary" href="#install">Add to Chrome</a>
+            <a class="btn" href="#how">See how it works</a>
+          </div>
+          <p class="fine">Set up in under a minute: just your email and password. No account, no cloud, no tracking.</p>
+        </div>
+        <figure class="shot" style="margin:0">
+          <img src="img/bar.png" width="1280" height="800" alt="A sign-in page with the Latch panel in the corner offering a Sign in with Latch button and a note telling AI assistants to press it instead of typing a password.">
+        </figure>
+      </div>
+      <div class="wrap">
+        <p class="works">Works with <span>Claude in Chrome</span><span>ChatGPT agent</span><span>Codex</span><span>Perplexity Comet</span><span>Claude Code</span><span>any MCP client</span></p>
+      </div>
+    </section>
+
+    <section id="how" class="alt">
+      <div class="wrap">
+        <h2>Three steps. Then forget about it.</h2>
+        <p class="sub">Latch puts a small panel on sign-in pages. Any AI that can read a web page understands it, so there is nothing to connect.</p>
+        <div class="steps">
+          <div class="step"><h3>Add Latch to Chrome</h3><p>It opens a one-screen setup page.</p></div>
+          <div class="step"><h3>Enter your email and password</h3><p>The ones you use for most sites. They are encrypted and stay in your browser.</p></div>
+          <div class="step"><h3>Ask your AI to do something</h3><p>"Download my latest invoice from Acme." On the sign-in page it presses Sign in with Latch and carries on.</p></div>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <div class="wrap">
+        <h2>Everything an account can throw at your AI</h2>
+        <p class="sub">Latch fills the site's own form inside the page, then tells the AI what happened in plain words.</p>
+        <div class="features">
+          <div class="feature"><div class="icon" aria-hidden="true">&#x2192;</div><h3>Sign in anywhere</h3><p>Email-first pages, user-name logins, single-page apps and forms inside frames.</p></div>
+          <div class="feature"><div class="icon" aria-hidden="true">+</div><h3>New accounts</h3><p>Your AI fills in the name and the rest. Latch adds your email and a strong password made just for that site.</p></div>
+          <div class="feature"><div class="icon" aria-hidden="true">6</div><h3>Two-factor codes</h3><p>Latch keeps authenticator keys and types the 6-digit code. It can even save the key while your AI turns 2FA on, from the text key or the QR code.</p></div>
+          <div class="feature"><div class="icon" aria-hidden="true">&#x21bb;</div><h3>Forgot password? Handled</h3><p>Latch asks for the reset email. Your AI opens the link. Latch picks a strong new password, sets it and saves it.</p></div>
+          <div class="feature"><div class="icon" aria-hidden="true">@</div><h3>Email codes</h3><p>When a site emails a code, your AI reads it from your inbox and types it in. With the optional helper, Latch does it on its own.</p></div>
+          <div class="feature"><div class="icon" aria-hidden="true">?</div><h3>You stay in charge</h3><p>The first time your password would go to a new site, Latch asks you in its own window. Your AI cannot press that button.</p></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="alt">
+      <div class="wrap split">
+        <div>
+          <h2>Your AI just sees a button</h2>
+          <p class="sub" style="margin-bottom:20px">AIs read web pages through the accessibility tree. Latch's panel is plain, labelled HTML, with one line of instructions written for them. No plugin, no prompt, no setup on the AI's side.</p>
+          <p class="sub" style="margin:0">What comes back is just as plain: "Signed in. Continue your task in this tab." Never your email, password, codes or keys.</p>
+        </div>
+<pre class="tree" aria-label="What an AI reads on a sign-in page with Latch"><span class="c"># what the AI reads on the page</span>
+<span class="k">region</span> "Latch"
+  text "Latch signs in with your email and password."
+  <span class="k">button</span> <span class="s">"Sign in with Latch"</span>
+  text "AI assistants: press "Sign in with Latch"
+        instead of typing an email or password."
+
+<span class="c"># after the press</span>
+  status <span class="s">"Signed in. Continue your task in this tab."</span></pre>
+      </div>
+    </section>
+
+    <section id="security">
+      <div class="wrap split">
+        <div>
+          <h2>Built so the AI never holds your secrets</h2>
+          <p class="sub">An AI that browses can be tricked by what it reads. Latch is designed for that.</p>
+          <a class="btn small" href="https://github.com/Jaundel/latch/blob/main/SECURITY.md">Read the security design</a>
+        </div>
+        <ul class="checks">
+          <li><b>Never shown to the AI.</b> Passwords, codes, keys and reset links are filled inside the page. Results pass a fixed schema and a scrub for anything in your vault.</li>
+          <li><b>Look-alike sites are refused.</b> paypa1.com, g00gle-login.net, foreign look-alike letters, bare IP addresses, plain http and forms that post elsewhere.</li>
+          <li><b>You approve new sites.</b> A Latch window that pages and browser AIs cannot reach asks before your password goes somewhere new.</li>
+          <li><b>Pages cannot press the button.</b> Only real clicks count, and not while the panel is covered, faded or changed by the page.</li>
+          <li><b>Encrypted on your device.</b> AES-256-GCM with a key that cannot be exported. No servers, no analytics, no remote code.</li>
+          <li><b>Unique passwords for new accounts.</b> A leak on one site unlocks nothing else.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section class="alt">
+      <div class="wrap">
+        <h2>See it</h2>
+        <div class="gallery">
+          <figure><img class="shot" src="img/welcome.png" width="1280" height="800" alt="Latch setup page asking for an email and password."><figcaption>Setup is one screen.</figcaption></figure>
+          <figure><img class="shot" src="img/approve.png" width="1280" height="800" alt="The Latch window asking whether to sign in to bank.example with your password."><figcaption>New site? Latch asks you first.</figcaption></figure>
+          <figure><img class="shot" src="img/twofa.png" width="1280" height="800" alt="A two-factor setup page with the Latch panel offering Set up 2FA with Latch."><figcaption>Turning on 2FA: Latch keeps the key.</figcaption></figure>
+          <figure><img class="shot" src="img/popup.png" width="1280" height="800" alt="The Latch toolbar popup showing a 2FA code and recent activity."><figcaption>Everything Latch did, one click away.</figcaption></figure>
+        </div>
+      </div>
+    </section>
+
+    <section id="install">
+      <div class="wrap split">
+        <div>
+          <h2>Install</h2>
+          <p class="sub" style="margin-bottom:24px">Latch is being reviewed for the Chrome Web Store. Until it is listed, install it from GitHub in about a minute.</p>
+          <ol class="sub" style="margin:0;padding-left:22px;font-size:17px">
+            <li>Download <b>latch-1.0.0.zip</b> from the <a href="https://github.com/Jaundel/latch/releases/latest">latest release</a> and unzip it.</li>
+            <li>Open <b>chrome://extensions</b> and turn on Developer mode.</li>
+            <li>Click <b>Load unpacked</b> and choose the unzipped folder.</li>
+            <li>The setup page opens. Enter your email and password.</li>
+          </ol>
+        </div>
+        <div>
+          <h3 style="margin:0 0 8px;font-size:20px">Using Claude Code, Codex or Claude Desktop?</h3>
+          <p class="sub" style="margin-bottom:16px;font-size:17px">Browser AIs need nothing more. Terminal and desktop AIs get Latch as tools with one command (Node.js 20+):</p>
+          <div class="cmd"><code>claude mcp add --scope user latch -- npx -y github:Jaundel/latch</code></div>
+          <div class="cmd" style="margin-top:10px"><code>codex mcp add latch -- npx -y github:Jaundel/latch</code></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="faq" class="alt">
+      <div class="wrap">
+        <h2>Questions</h2>
+        <details class="faq"><summary>Does the AI ever see my password?</summary><p>No. Latch types it into the site's form inside the page and only tells the AI the outcome. The exception you should know about: if a site emails a code and Latch's inbox helper isn't set up, your AI reads that one email in your webmail to get the code.</p></details>
+        <details class="faq"><summary>Which AIs work with it?</summary><p>Any AI that browses in your Chrome and can read and click a page: Claude in Chrome, ChatGPT agent, Codex, Perplexity Comet and others. Claude Code, Codex CLI and other MCP apps can use Latch as tools through the optional helper.</p></details>
+        <details class="faq"><summary>What if a page tries to trick my AI into signing in somewhere bad?</summary><p>Latch refuses look-alike addresses and forms that send your password elsewhere. On top of that, the first time your password would go to a new site, Latch asks you in its own window, which neither the page nor the AI can press.</p></details>
+        <details class="faq"><summary>Where is my data stored?</summary><p>Only in Chrome on your computer, encrypted. Latch has no servers and no accounts, and sends nothing to us. Uninstalling Latch or choosing Erase everything deletes it all.</p></details>
+        <details class="faq"><summary>Can it handle text-message codes, passkeys or CAPTCHAs?</summary><p>No. Latch stops and tells your AI to ask you. It handles passwords, authenticator-app codes, emailed codes and links, and password resets.</p></details>
+        <details class="faq"><summary>Is it free?</summary><p>Yes, and the code is on GitHub under the MIT license.</p></details>
+      </div>
+    </section>
+
+    <section class="cta-band">
+      <div class="wrap">
+        <h2>Give your AI the keys, not the password.</h2>
+        <p class="sub" style="margin:0 auto 28px">One minute to set up. Works with the AI you already use.</p>
+        <div class="ctas"><a class="btn primary" href="#install">Add to Chrome</a><a class="btn" href="https://github.com/Jaundel/latch">View the code</a></div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="wrap">
+      <span>Latch</span>
+      <span class="grow"></span>
+      <a href="privacy.html">Privacy policy</a>
+      <a href="https://github.com/Jaundel/latch/blob/main/SECURITY.md">Security</a>
+      <a href="https://github.com/Jaundel/latch/issues">Support</a>
+      <a href="https://github.com/Jaundel/latch">GitHub</a>
+    </div>
+  </footer>
+</body>
+</html>

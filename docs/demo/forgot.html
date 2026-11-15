@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Forgot password · Latch practice site</title>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; base-uri 'none'; form-action 'none'">
+  <link rel="stylesheet" href="demo.css">
+  <script src="demo.js" defer></script>
+</head>
+<body>
+  <div class="note">Latch practice site. Nothing you enter here leaves this page. <a href="../">Back to Latch</a></div>
+  <div class="nav"><i></i>Practice Co.</div>
+  <main>
+    <div class="card" id="forgot-card">
+      <h1>Forgot your password?</h1>
+      <p class="sub">Enter your email and we will send you a link to reset your password.</p>
+      <form id="forgot" method="post">
+        <label>Email <input type="email" name="email" required></label>
+        <button type="submit">Send reset link</button>
+      </form>
+    </div>
+    <div class="card" id="done" hidden>
+      <h1>Check your email</h1>
+      <p class="sub">If an account exists for that email, we sent a password reset link. On this practice site, the link is <a href="reset.html">here</a>.</p>
+    </div>
+  </main>
+</body>
+</html>

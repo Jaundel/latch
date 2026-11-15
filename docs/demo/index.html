@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sign in · Latch practice site</title>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; base-uri 'none'; form-action 'none'">
+  <link rel="stylesheet" href="demo.css">
+  <script src="demo.js" defer></script>
+</head>
+<body>
+  <div class="note">Latch practice site. Nothing you enter here leaves this page. <a href="../">Back to Latch</a></div>
+  <div class="nav"><i></i>Practice Co.</div>
+  <main>
+    <div class="card" id="signin">
+      <h1>Sign in</h1>
+      <p class="sub">Use Latch: press <b>Sign in with Latch</b> in the Latch panel.</p>
+      <form id="login" method="post">
+        <label>Email <input type="email" name="email" autocomplete="username" required></label>
+        <label>Password <input type="password" name="password" autocomplete="current-password" required></label>
+        <button type="submit">Sign in</button>
+      </form>
+      <p class="links"><a href="forgot.html">Forgot your password?</a><a href="2fa.html">Try 2FA setup</a></p>
+    </div>
+    <div class="card" id="done" hidden>
+      <h1>You're signed in</h1>
+      <p class="sub">Latch filled and submitted the form. Your AI would now carry on with its task.</p>
+      <button type="button" id="signout">Sign out</button>
+    </div>
+  </main>
+</body>
+</html>

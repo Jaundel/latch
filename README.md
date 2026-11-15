@@ -1,87 +1,91 @@
 # Latch
 
-Latch lets an AI that browses in Chrome sign in, create accounts and get through email verification without seeing your email address or password.
+Latch is a Chrome extension that lets an AI browsing for you sign in, create accounts, pass two-factor checks and reset forgotten passwords, without the AI seeing your email, password, codes or keys.
 
-You enter your email and password once, in the Latch extension. When your AI hits a login or sign-up page, it calls a Latch tool instead of typing anything. Latch fills the form in that same tab and submits it. If the site emails a code or link, Latch reads that one message and finishes the step. The AI gets back a short status such as `signed_in` and carries on with its own browser tools.
+Website and screenshots: https://jaundel.github.io/latch
 
-## Parts
+## How it works
 
-- `extension/` is the Chrome extension: the setup popup, the encrypted vault, and the code that fills forms in the tab.
-- `server/` is the MCP server your AI loads. It exposes the tools below, reads verification emails over IMAP, and talks to the extension on `127.0.0.1:47801`.
+You enter your email and password once. On sign-in, sign-up, 2FA and password reset pages, Latch shows a small panel with a button such as **Sign in with Latch**, and one sentence telling AI assistants to press it instead of typing credentials.
+
+AIs that work in Chrome (Claude in Chrome, ChatGPT agent, Codex, Perplexity Comet) read pages through the DOM and its accessibility tree, so they find the button and press it like any other. Latch fills the site's own form in that tab, submits it, and writes the outcome in the panel, for example "Signed in. Continue your task in this tab." Nothing needs to be installed or configured on the AI's side.
+
+| Page | Button | What Latch does |
+|---|---|---|
+| Sign-in | Sign in with Latch | Fills your email (or the user name saved for the site) and password, then any 2FA code it has a key for |
+| Sign-up | Create account with Latch | Fills your email and a new strong password made for that site, and saves it |
+| Authenticator code | Enter 2FA code with Latch | Enters the current code from the site's saved key |
+| 2FA setup | Set up 2FA with Latch | Reads the setup key (text, `otpauth://` link or QR code), saves it, and confirms it with a code |
+| Forgot password | Send reset email with Latch | Enters your email and asks for the reset link |
+| New password | Set new password with Latch | Picks a strong password, enters it in both fields, submits and saves it |
+| Emailed code | Enter code with Latch | With the optional inbox helper, reads the code itself. Without it, the panel tells the AI to read the newest email from that site in your webmail |
+
+CAPTCHAs, codes sent by text message, passkeys and push approvals come back to the AI as "ask the user".
+
+The toolbar popup shows what the current page offers, the 2FA code for the site, and recent activity. The Latch page (right-click the icon, Options) manages accounts, 2FA keys and settings.
+
+## Safety
+
+- The AI never receives your email, passwords, codes, keys or reset links from Latch. They are filled inside the page and the AI only gets a short status.
+- The first time your main password would go to a site Latch has not signed in to before, Latch asks you in its own window. Pages and browser AIs cannot reach or press that window. You can turn this off in Settings if your AI works unattended.
+- Latch refuses look-alike addresses (near-miss spellings, swapped characters, international look-alike letters), bare IP addresses, plain http pages, and forms that would send the password to another site.
+- The panel's buttons only respond to trusted input events (real clicks and key presses, which page scripts cannot fake), and only while the panel is visible, uncovered and unchanged.
+- Accounts Latch creates get unique random passwords. Everything is encrypted with AES-256-GCM under a non-exportable key and stays in your browser profile. There are no servers, analytics or remote code.
+
+[SECURITY.md](SECURITY.md) has the full design and its limits. The [privacy policy](https://jaundel.github.io/latch/privacy.html) covers what is stored and what leaves your computer.
+
+## Install
+
+Latch is in review for the Chrome Web Store. Until it is listed:
+
+1. Download `latch-1.0.0.zip` from the [latest release](https://github.com/Jaundel/latch/releases/latest) and unzip it.
+2. Open `chrome://extensions`, turn on Developer mode, click Load unpacked and pick the unzipped folder.
+3. The setup page opens. Enter your email and password.
+
+## Terminal and desktop AIs (optional)
+
+Browser AIs need nothing else. Claude Code, Codex CLI, Claude Desktop and other MCP clients can use Latch as tools through a small local server (Node.js 20 or later):
+
+```bash
+claude mcp add --scope user latch -- npx -y github:Jaundel/latch
+```
+
+```bash
+codex mcp add latch -- npx -y github:Jaundel/latch
+```
+
+For Claude Desktop and other apps, add `{"mcpServers": {"latch": {"command": "npx", "args": ["-y", "github:Jaundel/latch"]}}}` to the app's MCP config. The Latch page's Connect AIs screen shows these and turns green when one connects.
 
 | Tool | Use it when |
 |---|---|
 | `sign_in` | A page asks the user to log in, or a session expired |
-| `create_account` | On a sign-up page. The AI fills the other fields first and leaves email and password empty |
-| `verify_email` | A page says a code or link was sent to the user's email |
-| `fill_email` | A form (a job application, say) needs the user's email address |
+| `create_account` | On a sign-up page, after filling the non-credential fields |
+| `verify_email` | A page asks for an emailed code or link, or an authenticator code |
+| `fill_email` | A form needs the user's email address, without submitting it |
+| `request_password_recovery` | On a "forgot password" form |
+| `set_new_password` | On the page a reset link opens |
+| `setup_two_factor` | On a site's authenticator-app setup page |
+| `inspect_connection` | To check that Chrome is connected, without acting |
 
-The popup's **This tab** section runs the same flows on the page you're looking at: Sign in here, Create account here, Verify email.
+Each takes an optional `tabId` or `url` and returns JSON with `status`, `site`, a one-line `message`, and `next_action`. Results also describe the sign-in routes the page offers (`paths`), what Latch did and saw (`evidence`), the account state (`account`) and timings. Every result goes through a fixed schema and a scrub for anything in the vault before it leaves the extension.
 
-Each tool takes an optional `tabId` (the Chrome tab ID from the AI's browser tools) or `url` (the tab's current address, for tools that drive Chrome over DevTools, such as Playwright, and have no extension tab IDs), and returns JSON with `status`, `site` and a one-line `message`.
+The helper can also read verification emails over IMAP with an app password, so codes and links are handled without the AI opening webmail. Set it up on the Connect AIs screen.
 
-Several Chromes can run Latch at once, for example your everyday profile and a separate automation profile. Each keeps its own vault and its own connection to the server. When more than one is connected, the server asks each whether it has the tab (by `tabId` or `url`) and sends the call to that one, preferring the browser whose window is in front, then the most recent connection.
+## Development
 
-Results also include visible `paths` (email, password, supported social providers, SSO, account creation and guest access), `next_action`, and `evidence` containing attempted actions and observed page signals. These describe available choices; Latch does not click social sign-in automatically. A `lock_text` signal means lock-related wording was observed, not that the account is known to be locked.
-
-Mixed errors such as “incorrect email or password, or account might be locked” return `credentials_or_account_problem`, preserve the redacted site message, and set `retryable: false`. Latch blocks another sign-in attempt to that host for 60 seconds within the running worker. It does not infer account existence or recommend changing the password from an ambiguous error.
-
-The `account` object separates `creation`, `email_verification`, and `session`. Unknown states stay `unknown`; account creation does not imply email verification or an authenticated session. Existing pending credentials remain available for resuming signup.
-
-`timings.scope` is `tool_call`. Milliseconds cover total call time, page detection, combined filling/submission, page waiting, and verification. Filling and submission remain one operation to limit password exposure. Detection overlaps page waiting, and verification can include submission; these counters must not be added together. Navigation before the call, external Gmail or SSO steps, and human intervention are outside this measurement. An orchestrating agent must measure those separately to report a whole journey.
-
-Latch waits through empty redirect pages and forms that are still rendering. A disappearing sign-in form alone is not proof of authentication: `signed_in` requires an authenticated account control. If the page never provides a usable next step or success evidence, the tool returns `unconfirmed`; the AI must inspect the tab before continuing.
-
-Many application sites, including Greenhouse and Lever, accept applications without an account. On those forms, `sign_in` and `create_account` return `no_form` and leave the application untouched. Use `fill_email` to fill the email field separately; it does not submit the application.
-
-After updating the authentication runtime, reload Latch on `chrome://extensions`. The server compares a content fingerprint before filling credentials and returns `reload_required` if Chrome is still running an older copy. Timestamp-only changes and popup edits do not require a reload. It waits for the extension's ready message before sending an operation.
-
-## Install
-
-Requires Node 20 or later and Chrome 116 or later.
-
-```
+```bash
 npm install
-npm run setup
-```
-
-`npm run setup` prints the steps:
-
-1. Load `extension/` with "Load unpacked" on `chrome://extensions` (Developer mode on).
-2. Click the Latch icon and enter your email, password and an app password for your inbox.
-3. Connect your AI. The last setup screen in the popup shows the exact command for Claude Code, Codex and Claude Desktop, and turns green once one connects. From a terminal you can also run `npm run setup -- --claude-code`, `--claude-desktop` or `--codex`.
-
-After setup, nothing asks for approval. The popup's home screen shows what the page in front of you offers (a sign-in page, a sign-up page, a code prompt) with one button to run Latch on it, followed by recent activity and the accounts Latch knows.
-
-The inbox step is optional. Gmail app passwords need 2-Step Verification, many school and work Google accounts block them, and Outlook.com no longer accepts them for mail. Without an inbox connection, when a site emails a code or confirmation link, Latch returns `check_inbox` with your webmail address (for example `https://mail.google.com`). The AI uses its connected mail tools when available, otherwise webmail, to read only the newest matching verification message and finish the step itself. The user does not need to retrieve the email. In that case the AI sees that email; your password still stays private.
-
-## What the AI sees
-
-- Tool results never include the email, passwords, codes or links. The one exception is the `check_inbox` fallback above, where the AI reads the code from your webmail itself. Every result goes through a fixed schema and a redaction pass before it leaves the extension or the server.
-- While Latch fills a form, the AI is blocked waiting on the tool call. On normal forms the password goes in and the form is submitted in one script task, and the fields are emptied as soon as the browser has captured them. On single-page forms the password stays in the field until the site answers (about 0.4 s in the test), and Latch empties the fields before it returns.
-- Passwords Latch generates only go to the site they were made for. Your main password is used without prompts, but Latch first checks the page itself and refuses, with `blocked` / `suspicious_site`, when the address imitates a site you have an account on, your email's domain or a commonly impersonated brand (near-miss spellings, swapped characters like `paypa1`, the real name buried in someone else's domain); when the page is on a bare IP address or uses look-alike international characters; or when the form would send the password to a different site. `test/real-sites.mjs` checks that real application sites are not refused.
-- Latch fills credentials only on https pages, and on http when the page is local.
-
-Latch can't hide what a site shows you after you sign in, like a profile menu with your email in it. `fill_email` also leaves the address in the field, where the AI could read it back. Anything running as you on this computer can read Chrome's extension storage. That includes an AI with a shell or full desktop control. Latch keeps your details from an AI whose only reach is the browser.
-
-## What it hands back to you
-
-CAPTCHAs, codes sent to your phone, authenticator apps, passkeys, push approvals and locked accounts come back as `needs_user`, with a reason. Latch stops before filling anything it can't finish. It doesn't use "Continue with Google"-style buttons. It fills the site's own form.
-
-## Publish
-
-`npm run package` builds `dist/latch-<version>.zip` for the Chrome Web Store, without the development key. `docs/STORE.md` has the listing text, permission justifications and data disclosures. `docs/PRIVACY.md` is the privacy policy to host and link. After the first upload, put the store's extension ID in `STORE_ID` in `extension/id.js`.
-
-## Test
-
-`npm run test:chrome` runs the page/popup checks in installed Google Chrome and the
-socket-routing bridge fixture without Chromium. These are local fixtures; they do not
-establish successful authentication on a real employer site. The bridge checks the
-worker protocol as well as its build, and `inspect_connection` reports routing health
-without invoking authentication.
-
-```
 npm test
 ```
 
-The test starts local practice sites and a fake IMAP inbox, loads the extension in Chromium, and calls the tools through a real MCP client. It covers sign-up with code and link verification, sign-in, two-step single-page logins, retries, wrong passwords, CAPTCHA and phone hand-offs, the webmail fallback, iframes, lookalike sites, insecure pages and pausing. It then checks the tool results, the page, the server log and the saved data for anything private. Set `HEADED=1` to watch it run.
+`npm run test:unit` covers page detection, the guard, TOTP (RFC 6238 vectors) and the extension pages. `npm run test:extension` loads the extension into your installed Chrome with a throwaway profile (over the DevTools pipe, since Chrome no longer honours `--load-extension`) and drives the on-page panel end to end: approvals, refusals, hostile pages that restyle, cover or edit the panel, 2FA sign-in, 2FA setup from a text key and from a QR code, and the forgot-password flow. `node test/e2e.mjs` runs the MCP tools against local practice sites and a fake IMAP inbox and checks that nothing private reaches the AI.
+
+To run the panel tests against the exact store build: `npm run package`, then set `LATCH_TEST_EXTENSION` to the `dist/latch-<version>` folder.
+
+- `npm run package` builds `dist/latch-<version>.zip` for the Chrome Web Store. The store build leaves out the development key and the job application module.
+- `npm run store-assets` regenerates the store screenshots, promo tiles and the website images from the real extension.
+- `store/STORE.md` has the listing text, permission justifications and data disclosures.
+
+## License
+
+MIT
