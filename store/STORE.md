@@ -1,8 +1,15 @@
 # Chrome Web Store listing
 
-Build the upload with `npm run package` (writes `dist/latch-<version>.zip` without the development key or the job application module). Images in this folder come from `npm run store-assets`.
+Build the upload with `npm run package` (writes `dist/latch-<version>.zip` without the development key or the job application module). The same zip is attached to each GitHub release. Images in this folder come from `npm run store-assets`.
 
-After the first upload, copy the store's extension ID into `STORE_ID` in `extension/id.js` and push, so the optional local helper accepts the store copy.
+## Submitting
+
+1. Sign in to https://chrome.google.com/webstore/devconsole with a personal Google account (school and work accounts are often blocked from registering) and pay the one-time US$5 developer fee.
+2. Click New item and upload `latch-1.0.0.zip`.
+3. Store listing tab: paste the text below, pick the category, and upload the icon, screenshots and promo tiles from this folder.
+4. Privacy practices tab: paste the single purpose and the permission justifications, answer No to remote code, tick the three data types, certify, and enter the privacy policy URL.
+5. Paste the reviewer test instructions at the end of this file into the test instructions field, then Submit for review. Reviews usually take a few days.
+6. Once it has an ID, put it in `STORE_ID` in `extension/id.js` and push, so the optional local helper accepts the store copy, and point the site's "Add to Chrome" buttons at the listing.
 
 ## Store listing tab
 

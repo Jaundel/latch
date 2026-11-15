@@ -11,6 +11,12 @@
   "bin": {
     "latch-mcp": "server/index.js"
   },
+  "files": [
+    "server/",
+    "extension/",
+    "scripts/setup.mjs",
+    "SECURITY.md"
+  ],
   "scripts": {
     "start": "node server/index.js",
     "setup": "node scripts/setup.mjs",
