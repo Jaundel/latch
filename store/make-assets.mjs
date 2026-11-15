@@ -78,6 +78,8 @@ await login.bringToFront();
 await login.getByRole('button', { name: 'Sign in with Latch' }).waitFor({ timeout: 20000 });
 await sleep(900);
 await shot(login, 'bar');
+// The hero: the sign-in card and the panel, close up.
+await shot(login, 'hero', { clip: { x: 400, y: 0, width: 880, height: 600 } });
 
 // The approval window, asked for by a press on the bar.
 await login.getByRole('button', { name: 'Sign in with Latch' }).click();
@@ -166,7 +168,7 @@ const popupView = await compose(`<div style="position:relative;width:${W}px;heig
   <img src="${b64(shots.plain)}" style="position:absolute;inset:0;width:100%">
   <div style="position:absolute;inset:0;background:rgba(0,0,0,.12)"></div>
   <img src="${b64(shots.popup)}" style="position:absolute;right:28px;top:8px;width:360px;border-radius:12px;box-shadow:0 24px 60px rgba(0,0,0,.35);border:1px solid #d9d9df"></div>`);
-const views = { bar: shots.bar, welcome: shots.welcome, approve: approveView, twofa: shots.twofa, popup: popupView };
+const views = { bar: shots.bar, hero: shots.hero, welcome: shots.welcome, approve: approveView, twofa: shots.twofa, popup: popupView };
 for (const [name, buf] of Object.entries(views)) writeFileSync(join(imgDir, `${name}.png`), buf);
 writeFileSync(join(imgDir, 'icon-128.png'), readFileSync(join(root, 'extension', 'icons', '128.png')));
 

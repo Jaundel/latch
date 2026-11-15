@@ -92,6 +92,7 @@ h2 { font-size: clamp(30px, 3.4vw, 42px); letter-spacing: -.03em; line-height: 1
 .feature .icon { width: 40px; height: 40px; border-radius: 12px; display: grid; place-items: center; background: var(--ink); color: var(--brass-2); margin-bottom: 16px; }
 
 .split { display: grid; grid-template-columns: 1fr 1fr; gap: 48px; align-items: center; }
+.split > *, .hero .wrap > * { min-width: 0; }
 pre.tree { margin: 0; padding: 22px 24px; border-radius: var(--radius); background: #16161a; color: #e9e9ee; font: 14.5px/1.65 ui-monospace, "Cascadia Mono", Consolas, monospace; overflow-x: auto; white-space: pre-wrap; box-shadow: var(--shadow); }
 pre.tree .k { color: #e2a336; }
 pre.tree .s { color: #9fd6b3; }
