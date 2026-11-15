@@ -185,14 +185,18 @@ async function onBridgeMessage(ws, raw) {
     reply(ws, { type: 'located', id: msg.id, ...await locateTab(msg.args || {}) });
   } else if (msg.type === 'call') {
     const job = { id: msg.id, ws, deadline: Number(msg.deadline) || Infinity, cancelled: false, acted: false };
-    const client = String(msg.client || '').slice(0, 60);
+    // A name is only a label for the activity list; the bridge can never claim to be the user.
+    let client = String(msg.client || '').slice(0, 60);
+    if (['you', 'page'].includes(client)) client = 'local';
     jobs.set(msg.id, job);
     const result = await enqueue(() => (stopped(job) ? skipped(msg.tool, client) : runTool(msg.tool, msg.args || {}, client, job)));
     jobs.delete(msg.id);
     reply(ws, { type: 'result', id: msg.id, result });
   } else if (msg.type === 'reload') {
     // The bridge has newer files on disk than this worker runs. Reload only when idle, so no call is cut short.
-    if (!jobs.size && !activeJob && typeof msg.build === 'string' && msg.build !== await loadedBuild) chrome.runtime.reload();
+    // Only an unpacked copy runs those files; a store copy updates through the store and ignores this.
+    const unpacked = !chrome.runtime.getManifest().update_url;
+    if (unpacked && !jobs.size && !activeJob && typeof msg.build === 'string' && msg.build !== await loadedBuild) chrome.runtime.reload();
   } else if (msg.type === 'cancel') {
     const job = jobs.get(msg.id);
     if (job?.ws === ws) { job.cancelled = true; cancelApplication(job); cancelRecovery(job); }
@@ -449,33 +453,44 @@ async function credentialFor(ctx, host, formActionHost = '', { use } = {}) {
       },
     };
   }
-  if (needsApproval(ctx, host)) {
-    const answer = await askApproval(host, ctx.tabId);
-    if (answer !== 'allow') {
-      const denied = answer === 'deny';
-      return {
-        blocked: {
-          status: 'needs_user', reason: denied ? 'approval_denied' : 'approval_missing', site: host, retryable: !denied, next_action: 'ask_user',
-          message: denied
-            ? `The user chose not to let Latch use their password on ${host}. Do not try again on this site; ask the user how to proceed.`
-            : `Latch asked the user to allow signing in to ${host} and got no answer. Ask the user to approve it in the Latch window, then try again.`,
-        },
-      };
-    }
-  }
+  const refused = await approveMain(ctx, host);
+  if (refused) return { blocked: refused };
   // Tagged with the host signed in to: a sibling's entry says nothing about this account.
   return { username: site?.username || main.email, password: main.password, host, source: 'main' };
 }
 
 // ---------- approving the main password for a new site
 
-// A site counts as known once Latch has signed in or created an account there.
+// Latch has an entry for this site, whatever made it. Used for display only, never to trust a site.
 const knownSite = (vault, host) => Object.keys(vault.sites).some(h => h === host || baseDomain(h) === baseDomain(host));
 
-function needsApproval(ctx, host) {
-  if (ctx.client === 'you' || !ctx.meta?.settings?.confirmNewSites) return false;
-  if (knownSite(ctx.vault, host)) return false;
-  return !(ctx.meta.settings.approvedSites || []).includes(baseDomain(host));
+// Where the main password may go without asking: a site the user allowed or saved themselves, or
+// one where the main password already signed in. Entries Latch makes on its own (a reset request,
+// a 2FA key, a generated password) say nothing about whether the site deserves the main password.
+function trustedForMain(vault, settings, host) {
+  const base = baseDomain(host);
+  if ((settings.approvedSites || []).includes(base)) return true;
+  return Object.entries(vault.sites).some(([h, s]) => baseDomain(h) === base && (s.mainTrusted || s.source === 'you'));
+}
+
+const DENIAL_MS = 10 * 60e3;
+
+// null when the main password may be used here, otherwise the result to return.
+async function approveMain(ctx, host) {
+  if (ctx.byUser || !ctx.meta?.settings?.confirmNewSites || trustedForMain(ctx.vault, ctx.meta.settings, host)) return null;
+  // A "Don't allow" holds for a while, so a page cannot keep the approval window popping up.
+  const key = `denied:${baseDomain(host)}`;
+  const deniedAt = (await chrome.storage.session.get(key))[key];
+  const answer = deniedAt && now() - deniedAt < DENIAL_MS ? 'deny' : await askApproval(host, ctx.tabId);
+  if (answer === 'allow') return null;
+  if (answer === 'deny' && !deniedAt) await chrome.storage.session.set({ [key]: now() });
+  const denied = answer === 'deny';
+  return {
+    status: 'needs_user', reason: denied ? 'approval_denied' : 'approval_missing', site: host, retryable: !denied, next_action: 'ask_user',
+    message: denied
+      ? `The user chose not to let Latch use their password on ${host}. Do not try again on this site; ask the user how to proceed.`
+      : `Latch asked the user to allow signing in to ${host} and got no answer. Ask the user to approve it in the Latch window, then try again.`,
+  };
 }
 
 const approvals = new Map(); // id -> { host, tabId, resolve }
@@ -892,6 +907,8 @@ async function signedIn(ctx, host, pass) {
     const sibling = siteFor(ctx.vault, host);
     if (sibling?.username) patch.username = sibling.username;
   }
+  // The main password went in here with the user's approval (or before approvals existed).
+  if (pass?.source === 'main') patch.mainTrusted = true;
   await rememberSite(siteHost, patch);
   const verified = ctx.verified ? { verified: true } : {};
   if (pass?.source === 'main' && (pass.altTried || pass.pendingMain)) {
@@ -1226,8 +1243,12 @@ async function readQrKey(ctx) {
   const rect = res?.result;
   if (!rect) return null;
   await sleep(350);
+  // The screenshot shows whatever is in front, so it counts only if this tab, at the same
+  // address, was in front both before and after it was taken.
+  const inFront = async () => { const t = await chrome.tabs.get(tab.id).catch(() => null); return !!t?.active && t.url === tab.url; };
+  if (!await inFront()) return null;
   const shot = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' }).catch(() => null);
-  if (!shot) return null;
+  if (!shot || !await inFront()) return null;
   const image = await createImageBitmap(await (await fetch(shot)).blob());
   const scale = rect.dpr || 1;
   const pad = 12;
@@ -1492,7 +1513,9 @@ async function applicationTool(args, job) {
   return { ...(response?.result || { status: 'error', message: 'Application engine returned no result.' }), tabId: tab.id, url: after?.url || current.url };
 }
 
-async function runTool(tool, args, client = '', job = null) {
+// byUser: the user started this themselves in the popup, so no approval window is needed.
+// It is passed in code, never taken from a caller's message.
+async function runTool(tool, args, client = '', job = null, { byUser = false } = {}) {
   if (tool === 'application_page') {
     activeJob = job;
     try { return await applicationTool(args, job); }
@@ -1520,8 +1543,13 @@ async function runTool(tool, args, client = '', job = null) {
       // A frozen tab never answers a script, and the call would hold up everything queued behind it.
       const asleep = tab?.frozen || tab?.discarded;
       if (asleep) tab = null;
-      result = tab
-        ? await FLOWS[tool]({ tab, tabId: tab.id, vault, meta, verified: false, client })
+      // A press is for the page it was made on; if the tab has moved on since, nothing runs.
+      let originNow = '';
+      try { originNow = new URL(tab?.url || '').origin; } catch {}
+      const moved = !!tab && typeof args.expectOrigin === 'string' && originNow !== args.expectOrigin;
+      result = moved ? { status: 'error', message: 'The page changed before Latch could start. Look at the page again before pressing.' }
+        : tab
+        ? await FLOWS[tool]({ tab, tabId: tab.id, vault, meta, verified: false, client, byUser })
         : { status: 'error', message: asleep ? 'Chrome has put that tab to sleep, so nothing was done in it. Open the page again.' : !Number.isInteger(args.tabId) && args.url
           ? 'No open tab shows that address. Pass the tab\'s current URL or its tabId.'
           : 'That tab does not exist. Pass the tabId from your browser tools.' };
@@ -1565,7 +1593,9 @@ async function runTool(tool, args, client = '', job = null) {
   result.timings = { scope: 'tool_call', total_ms: now() - started, detection_ms: observation.detection_ms, fill_submit_ms: observation.fill_submit_ms,
     page_wait_ms: observation.page_wait_ms, verification_ms: observation.verification_ms };
   observation = null;
-  result = redact(result, vault || emptyVault());
+  // The flow may have saved new secrets (a generated or reset password, a 2FA key), so scrub
+  // against the vault as it is now as well as as it was.
+  result = redact(redact(result, vault || emptyVault()), await readVault().catch(() => emptyVault()));
   await recordActivity(tool, result, client).catch(() => {});
   return result;
 }
@@ -1742,6 +1772,7 @@ const AI = 'AI assistants: ';
 function forPage(text) {
   const tools = Object.keys(TOOL_LABELS).join('|');
   return String(text || '')
+    .replace(/ The site says: ".*"$/, '')
     .replace(/use fill_email to fill its email field without submitting it/g, 'fill its email field directly')
     .replace(new RegExp(`\\b(?:call|use) (${tools})\\b`, 'g'), (_, t) => `press "${TOOL_LABELS[t]}"`)
     .replace(new RegExp(`\\b(${tools})\\b`, 'g'), (_, t) => `"${TOOL_LABELS[t]}"`);
@@ -1767,16 +1798,15 @@ async function barModel(tab) {
   const webmail = !inbox && ['code', 'check_email'].includes(page.kind) ? await webmailFor(vault.identity.email).catch(() => '') : '';
   switch (page.kind) {
     case 'sign_in':
-      return offer('sign_in', h, page.saved ? `Latch has your account for ${h}.` : 'Latch signs in with your email and password.',
+      return offer('sign_in', h, 'Latch signs in with your saved details.',
         `${AI}${press('sign_in')} instead of typing an email or password. Latch fills them privately and reports the result here.`);
     case 'sign_up':
       return offer('create_account', h, 'Latch creates the account with your email and a new strong password.',
         `${AI}fill in the other fields first and leave email and password empty, then ${press('create_account')}.`);
     case 'totp':
-      return page.totp
-        ? offer('totp', h, `Latch has the 2FA key for ${h}.`, `${AI}${press('totp')} to fill the authenticator code.`)
-        : { host: h, note: `${h} wants a code from an authenticator app, and Latch has no 2FA key for this site.`,
-          agent: `${AI}ask the user for the code from their authenticator app.` };
+      // Offered whether or not a key is saved, so the page cannot tell which.
+      return offer('totp', h, 'Latch can enter the code from your authenticator app if it has the key for this site.',
+        `${AI}${press('totp')}. If Latch has no key for this site, ask the user for the code.`);
     case 'phone_code':
       return { host: h, note: `${h} sent a code to your phone.`, agent: `${AI}ask the user for the code sent to their phone.` };
     case 'code':
@@ -1894,7 +1924,7 @@ async function barAct(sender, action) {
   barResults.delete(tabId);
   pushBar(tab, entry.busyModel);
   const job = { id: `page-${++barSeq}`, ws: null, deadline: now() + 240000, cancelled: false, acted: false };
-  enqueue(() => runTool(tool, { tabId, url: tab.url }, 'page', job)).then(result => {
+  enqueue(() => runTool(tool, { tabId, url: tab.url, expectOrigin: new URL(tab.url).origin }, 'page', job)).then(result => {
     entry.busy = false;
     barResults.set(tabId, { at: now(), host: result.site || hostOf(tab.url), text: forPage(result.message), tone: toneOf(result), linkUrl: result.inbox || '' });
     scheduleBar(tabId, 700);
@@ -1934,7 +1964,7 @@ const popupHandlers = {
     const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
     if (!tab || !/^https?:/.test(tab.url || '')) return { status: 'error', message: 'Open the site\'s page first.' };
     const job = { id: `you-${++barSeq}`, ws: null, deadline: now() + 120000, cancelled: false, acted: false };
-    const result = await enqueue(() => runTool(tool, { tabId: tab.id, url: tab.url }, 'you', job));
+    const result = await enqueue(() => runTool(tool, { tabId: tab.id, url: tab.url }, 'you', job, { byUser: true }));
     return { ...result, message: forPage(result.message) };
   },
   codes: async () => {
@@ -1955,6 +1985,8 @@ const popupHandlers = {
       if (!v.identity) throw new Error('not set up');
       v.sites[site] ||= { username: v.identity.email, password: null, source: 'main', createdAt: now(), status: 'active' };
       v.sites[site].totp = { secret: parsed.secret, digits: parsed.digits, period: parsed.period, algorithm: parsed.algorithm, issuer: parsed.issuer, addedAt: now(), verified: false };
+      // The user named this site themselves, so it may receive the main password without asking.
+      v.sites[site].mainTrusted = true;
     });
     return { ok: true, host: site };
   },

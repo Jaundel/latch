@@ -191,6 +191,8 @@
     host.append(...Object.values(parts));
 
     parts.primary.addEventListener('click', onPrimary, true);
+    parts.primary.addEventListener('focus', earnFocus);
+    parts.primary.addEventListener('blur', () => { earnedFocusAt = 0; });
     parts.close.addEventListener('click', e => {
       e.preventDefault();
       e.stopPropagation();
@@ -300,20 +302,48 @@
     changed: 'Latch ignored that press because the page changed the Latch panel. Press again.',
     covered: 'Latch ignored that press because something on the page is covering the Latch panel. Press again.',
     new: 'Latch had only just appeared, so it ignored that press. Press again.',
+    key: 'Latch ignored a key press it did not get directly. Click the button, or Tab to it and press Enter.',
   };
+
+  // Text a page could slip into the panel with CSS (::before or ::after content).
+  const PSEUDO = ['::before', '::after'];
+  function decorated() {
+    for (const el of [host, ...Object.values(parts)]) {
+      for (const pseudo of PSEUDO) {
+        const content = getComputedStyle(el, pseudo).content;
+        if (content && content !== 'none' && content !== 'normal') return true;
+      }
+    }
+    return false;
+  }
+
   function refusal() {
     if (!host?.isConnected || performance.now() - tamperedAt < 1000) return 'changed';
     try { if (!host.matches(':popover-open')) return 'changed'; } catch { return 'changed'; }
-    if (parts.primary.parentNode !== host || parts.primary.hidden) return 'changed';
+    if (parts.primary.parentNode !== host || parts.primary.hidden || decorated()) return 'changed';
     if (!visibleSince) return 'covered';
     return performance.now() - visibleSince < 250 ? 'new' : '';
   }
+
+  // A key press reaches the button only if it had focus. A page can move focus there with
+  // .focus() just before the user or an AI presses Enter for something else, so a press from
+  // the keyboard counts only when the button was reached by Tab or a pointer.
+  let lastTab = -Infinity;
+  let lastPoint = -Infinity;
+  let earnedFocusAt = 0;
+  addEventListener('keydown', e => { if (e.isTrusted && e.key === 'Tab') lastTab = performance.now(); }, true);
+  addEventListener('pointerdown', e => { if (e.isTrusted) lastPoint = performance.now(); }, true);
+  function earnFocus() {
+    const t = performance.now();
+    earnedFocusAt = t - lastTab < 400 || t - lastPoint < 400 ? t : 0;
+  }
+  const fromKeyboard = e => e.detail === 0;
 
   async function onPrimary(e) {
     e.preventDefault();
     e.stopPropagation();
     if (!e.isTrusted || pending || !model?.action) return;
-    const refused = refusal();
+    const refused = fromKeyboard(e) && (!earnedFocusAt || performance.now() - earnedFocusAt < 250) ? 'key' : refusal();
     if (refused) {
       raise();
       quietly(() => {

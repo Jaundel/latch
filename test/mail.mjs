@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { after, before, test } from 'node:test';
-import { extractLink, findVerification, headerScore, judgeMessage, RESET_LINK, RESET_SUBJECT } from '../server/mail.js';
+import { baseDomain, extractLink, findVerification, headerScore, judgeMessage, RESET_LINK, RESET_SUBJECT } from '../server/mail.js';
 import { Mailbox, startImap } from './fixture.js';
 
 const HOST = 'acme.wd5.myworkdayjobs.com';
@@ -164,4 +164,19 @@ test('findVerification over IMAP returns the code for verify and the link for re
 test('findVerification verify with expect link never opens the reset mail', async () => {
   const r = await findVerification(request({ expect: 'link' }));
   assert.equal(r.found, false);
+});
+
+test('a look-alike page never gets another site\'s code, whatever the sender name says', () => {
+  const chase = { from: { value: [{ address: 'no-reply@alerts.chase.com', name: 'Chase' }] }, subject: 'Your Chase verification code' };
+  assert.equal(headerScore(chase, 'chase.evil.com'), 0, 'a brand name in the page host is not a sender match');
+  assert.ok(headerScore(chase, 'secure.chase.com') >= 3, 'the real site still matches');
+  const portal = { from: { value: [{ address: 'noreply@myworkday.com', name: 'Acme Careers' }] }, subject: 'Verify your email' };
+  assert.ok(headerScore(portal, 'acme.wd5.myworkdayjobs.com') > 0, 'job portals still match by the employer name');
+});
+
+test('each customer of a hosting service is its own site', () => {
+  assert.equal(baseDomain('attacker.github.io'), 'attacker.github.io');
+  assert.notEqual(baseDomain('a.vercel.app'), baseDomain('b.vercel.app'));
+  assert.equal(baseDomain('login.uni.edu.au'), 'uni.edu.au');
+  assert.equal(baseDomain('accounts.google.com'), 'google.com');
 });

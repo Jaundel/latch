@@ -27,9 +27,10 @@ Because the buttons are in the page's DOM, page scripts can see and touch them. 
 - Acts only on `isTrusted` events. `element.click()` and `dispatchEvent` from page scripts are ignored.
 - Lives in the browser's top layer (a manual popover), so ordinary page elements cannot be drawn over it regardless of `z-index`.
 - Uses Intersection Observer v2 (`trackVisibility`) and ignores presses unless the button has been visibly unobscured, unfaded and untransformed for at least 250 ms. A page that puts its own top-layer element over the panel gets presses refused, and the panel raises itself back on top.
-- Watches its own nodes. If the page edits, moves or removes them, the panel is rebuilt and presses are refused for a second.
+- Watches its own nodes. If the page edits, moves or removes them, the panel is rebuilt and presses are refused for a second. Presses are also refused while page CSS adds `::before` or `::after` text to the panel.
+- Counts a key press (Enter or Space) only if the button was reached by Tab or a pointer, so a page cannot `.focus()` the button just before a key press meant for something else.
 - Styles slotted content with `!important` rules in the shadow root, which outrank page styles, including the page's own `!important` rules.
-- Never contains a credential, code, key or link. It shows only what a page could already infer: that it has a sign-in form.
+- Never contains a credential, code, key or link to an account, and never repeats text the site wrote. Its wording does not reveal whether Latch holds a password or 2FA key for the site.
 
 The service worker then checks that the press matches what it is currently offering on that tab, that the message came from the tab's top frame and that frame's host still matches the tab, and rate-limits presses per tab.
 
@@ -37,7 +38,11 @@ The service worker then checks that the press matches what it is currently offer
 
 Before the main password is filled anywhere, `extension/guard.js` refuses pages whose address imitates a commonly impersonated brand, a site in the vault or the user's email domain (near-miss spellings, digit and letter swaps such as `paypa1`, a brand name buried inside someone else's domain), bare IP addresses, IDN look-alikes, and forms whose action posts to another site. Credentials are only filled on https pages (http only on localhost).
 
-A prompt-injected agent could still be sent to an ordinary site that imitates nothing. So the first time the main password would go to a site Latch has no account for, Latch opens an approval window (`approve.html`). It is a separate extension window: page scripts cannot reach it and browser agents, which act inside their tabs, cannot script or click it. "Allow" is disabled for 700 ms after it appears, focus starts on "Don't allow", and Escape answers no. An allowed site is remembered by its registrable domain. Users whose agent runs unattended can turn this off; installs that predate the setting keep running without it.
+A prompt-injected agent could still be sent to an ordinary site that imitates nothing. So before the main password goes to a site, Latch needs one of: the user allowed that site in the approval window, the user saved a password or added a 2FA key for it themselves, or the main password has already signed in there. An entry Latch created on its own, such as a reset request, a 2FA key read from a page, or a generated password, does not count, so a page cannot earn trust by getting the agent to press a harmless button first.
+
+Otherwise Latch opens an approval window (`approve.html`). It is a separate extension window: page scripts cannot reach it and browser agents, which act inside their tabs, cannot script or click it. "Allow" is disabled for 700 ms after it appears, focus starts on "Don't allow", and Escape answers no. An allowed site is remembered by its registrable domain; a refusal holds for ten minutes, so a page cannot keep the window popping up. Users whose agent runs unattended can turn approvals off; installs that predate the setting keep running without it. Flows the user starts from the popup never ask, and that is decided in code, not by anything a caller sends.
+
+Registrable domains treat shared hosting (github.io, vercel.app, pages.dev and others) and country registries (edu.au, gov.ca) as suffixes, so approving or knowing one customer's site never covers another's.
 
 New accounts, password resets and 2FA setup never need approval, because they only ever put freshly generated secrets into the page, which are useless anywhere else.
 
@@ -59,7 +64,13 @@ On a 2FA setup page Latch prefers an `otpauth://` link, then a setup key shown a
 
 ### Password resets
 
-The recovery form gets the user's email (or the saved user name for that site), except on employee systems such as a company's own Workday, where the account likely uses a work identity. The reset link is opened by the agent from the user's inbox, or by the optional helper, which only accepts https links on the site's own domain. On the reset page Latch generates the new password, saves it before submitting, and restores the previous entry only if the site visibly rejects the change.
+The recovery form gets the user's email (or the saved user name for that site), except on employee systems such as a company's own Workday, where the account likely uses a work identity. On the reset page Latch generates the new password, saves it before submitting, and restores the previous entry only if the site visibly rejects the change.
+
+Without the inbox helper, the agent opens the reset link from the user's webmail. That link is a short-lived way into the account, so in that setup the agent does handle it; this is the cost of letting an agent finish a forgotten password on its own. With the helper, Latch finds the reset email itself and only accepts https links on the site's own domain.
+
+### Emailed codes (inbox helper)
+
+The helper reads only recent messages that match the site. For ordinary sites the sender's registrable domain must be the page's own, so a look-alike page such as `chase.evil.com` can never receive the real Chase code. Job portals, which mail from the vendor's domain in the employer's name, may also match on the employer's name.
 
 ### Extension hardening
 
@@ -67,11 +78,12 @@ The recovery form gets the user's email (or the saved user name for that site), 
 - Extension pages run under `script-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`. No resources are web-accessible, and there is no `externally_connectable`, so web pages cannot message the extension.
 - Message handlers accept extension-page messages only from the extension's own origin, and content-script messages only for the bar's two message types.
 - Permissions: `storage`, `scripting`, `alarms`, `favicon` and host access to all sites, which a sign-in helper needs. No `tabs`, `cookies`, `webRequest`, `history` or `identity`.
-- The optional MCP server listens on 127.0.0.1 only and accepts WebSocket connections from the extension's own origins.
+- The optional MCP server listens on 127.0.0.1 only and accepts WebSocket connections from the extension's own origins. The extension connects to whatever listens on that port, so a hostile local program could pose as the helper; local programs are outside the threat model because they can read the browser profile anyway. Names a caller sends are labels only and can never stand for the user, and only an unpacked copy obeys the helper's reload request.
 
 ## Known limits
 
 - Sites can display the user's email after sign-in, where an agent may read it.
-- Without the inbox helper, an agent reads verification emails (codes and reset links) in the user's webmail.
-- The panel's existence tells a page that Latch is installed.
+- Without the inbox helper, an agent reads verification emails, including codes and reset links, in the user's webmail.
+- The panel's existence tells a page that Latch is installed, and its "Open inbox" link shows which webmail the user has.
+- The approval window stops agents that act inside browser tabs. An agent that controls the whole screen can press it like a person.
 - Detection is heuristic. When Latch is unsure it reports `unconfirmed` or `no_form` instead of guessing.

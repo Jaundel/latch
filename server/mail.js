@@ -6,21 +6,9 @@ import { createHash } from 'node:crypto';
 import { Resolver, resolveMx, resolveTxt } from 'node:dns/promises';
 import { ImapFlow } from 'imapflow';
 import { simpleParser } from 'mailparser';
-import { resetLinkAllowed } from '../extension/domains.js';
+import { baseDomain, isAtsHost, resetLinkAllowed } from '../extension/domains.js';
 
-const TWO_PART_TLDS = new Set([
-  'co.uk', 'org.uk', 'ac.uk', 'gov.uk', 'com.au', 'net.au', 'org.au', 'co.nz', 'co.jp', 'co.in',
-  'com.br', 'com.mx', 'co.za', 'com.sg', 'com.hk', 'com.tr', 'com.cn', 'co.kr', 'com.ar', 'on.ca',
-]);
-
-export function baseDomain(host) {
-  host = String(host || '').toLowerCase().replace(/\.$/, '');
-  if (/^[\d.]+$/.test(host) || host.includes(':')) return host;
-  const parts = host.split('.');
-  if (parts.length <= 2) return host;
-  const lastTwo = parts.slice(-2).join('.');
-  return parts.slice(TWO_PART_TLDS.has(lastTwo) ? -3 : -2).join('.');
-}
+export { baseDomain };
 
 const GENERIC_LABELS = new Set(['www', 'login', 'accounts', 'account', 'auth', 'app', 'my', 'secure', 'signin', 'id', 'sso', 'portal', 'careers', 'jobs', 'mail']);
 
@@ -215,7 +203,12 @@ export function headerScore(parsed, siteHost, purpose = 'verify') {
   if (purpose !== 'reset' && RESET_SUBJECT.test(subject)) return 0;
   const haystack = `${from.name || ''} ${from.address || ''} ${subject}`.toLowerCase();
   let score = 0;
-  if (baseDomain(fromHost) === site) score += 3;
+  const sameSite = baseDomain(fromHost) === site;
+  if (sameSite) score += 3;
+  // A name in the sender or subject is no proof of who sent it: chase.evil.com would claim the
+  // real Chase code. Only job portals, which mail from the vendor's domain in the employer's
+  // name, may match that way; every other site's mail must come from its own domain.
+  else if (!isAtsHost(siteHost)) return 0;
   if (siteLabels(String(siteHost || '').toLowerCase()).some(l => haystack.includes(l))) score += 2;
   if (SUBJECT_HINT.test(subject)) score += 1;
   if (purpose === 'reset' && RESET_SUBJECT.test(subject)) score += 2;

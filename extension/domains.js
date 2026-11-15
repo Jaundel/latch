@@ -2,13 +2,33 @@ const TWO_PART_TLDS = new Set([
   'co.uk', 'org.uk', 'ac.uk', 'gov.uk', 'com.au', 'net.au', 'org.au', 'co.nz', 'co.jp', 'co.in',
   'com.br', 'com.mx', 'co.za', 'com.sg', 'com.hk', 'com.tr', 'com.cn', 'co.kr', 'com.ar', 'on.ca',
 ]);
+// Under a country code these second levels are registries, not organisations (gov.au, ac.jp).
+const CC_SECOND_LEVELS = new Set(['co', 'com', 'net', 'org', 'gov', 'edu', 'ac', 'or', 'ne', 'go', 'gob', 'mil', 'nic', 'sch', 'ltd', 'plc', 'nhs', 'gv', 'qc', 'bc', 'ab']);
+// Hosting services where every customer gets a subdomain. Each customer is its own site, so
+// approving or knowing one must never vouch for another (a slice of the Public Suffix List).
+const SHARED_SUFFIXES = new Set([
+  'github.io', 'gitlab.io', 'bitbucket.io', 'vercel.app', 'now.sh', 'netlify.app', 'netlify.com', 'pages.dev', 'workers.dev',
+  'herokuapp.com', 'appspot.com', 'web.app', 'firebaseapp.com', 'azurewebsites.net', 'azurestaticapps.net', 'cloudfront.net',
+  'amazonaws.com', 's3.amazonaws.com', 'elasticbeanstalk.com', 'blogspot.com', 'wordpress.com', 'wixsite.com', 'weebly.com',
+  'squarespace.com', 'myshopify.com', 'webflow.io', 'framer.app', 'framer.website', 'carrd.co', 'notion.site', 'onrender.com',
+  'fly.dev', 'glitch.me', 'repl.co', 'replit.app', 'replit.dev', 'surge.sh', 'deno.dev', 'ngrok.io', 'ngrok-free.app',
+  'trycloudflare.com', 'pythonanywhere.com', 'readthedocs.io', 'gitbook.io', 'sharepoint.com', 'googleusercontent.com',
+  'blob.core.windows.net', 'web.core.windows.net', 'translate.goog', 'duckdns.org', 'no-ip.org', 'ddns.net', 'hopto.org',
+  'github.dev', 'codesandbox.io', 'csb.app', 'stackblitz.io', 'streamlit.app', 'hf.space', 'lovable.app', 'bolt.new',
+]);
 
+// The registrable domain: the part an organisation owns, with the shared suffix it sits under.
 export function baseDomain(host) {
-  host = String(host || '').toLowerCase();
+  host = String(host || '').toLowerCase().replace(/\.$/, '');
   if (/^[\d.]+$/.test(host) || host.includes(':')) return host;
   const parts = host.split('.');
+  for (let n = Math.min(4, parts.length - 1); n >= 2; n--) {
+    if (SHARED_SUFFIXES.has(parts.slice(-n).join('.'))) return parts.slice(-(n + 1)).join('.');
+  }
   if (parts.length <= 2) return host;
-  return parts.slice(TWO_PART_TLDS.has(parts.slice(-2).join('.')) ? -3 : -2).join('.');
+  const lastTwo = parts.slice(-2);
+  const twoPart = TWO_PART_TLDS.has(lastTwo.join('.')) || (lastTwo[1].length === 2 && CC_SECOND_LEVELS.has(lastTwo[0]));
+  return parts.slice(twoPart ? -3 : -2).join('.');
 }
 
 // Applicant tracking systems where job portal accounts live.
