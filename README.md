@@ -38,7 +38,7 @@ The toolbar popup shows what the current page offers, the 2FA code for the site,
 
 Latch is not on the Chrome Web Store yet. Until it is:
 
-1. Download `latch-1.0.0.zip` from the [latest release](https://github.com/Jaundel/latch/releases/latest) and unzip it.
+1. [Download latch-1.0.0.zip](https://github.com/Jaundel/latch/releases/latest/download/latch-1.0.0.zip) and unzip it.
 2. Open `chrome://extensions`, turn on Developer mode, click Load unpacked and pick the unzipped folder.
 3. The setup page opens. Enter your email and password.
 
