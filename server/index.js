@@ -198,6 +198,8 @@ async function onExtensionMessage(ws, data) {
         log(`${msg.type} failed: ${err.code || err.name}`);
         result = { error: 'failed' };
       }
+      // Outcome only: never the code, link or address.
+      if (msg.type === 'mail') log(`mail search: ${result.found ? (result.code ? 'code' : 'link') : `nothing${result.error ? ` (${result.error})` : ''}`}`);
       send(ws, { type: 'reply', id: msg.id, result });
       break;
     }

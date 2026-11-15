@@ -338,8 +338,17 @@ const signature = snap => {
   ].join('|') : '';
 };
 
+// How long a sign-in form must stay put before Latch acts on it. The same kind of form as
+// before may be re-rendering with an error, so it gets longer. A new step (a password field
+// where the email field was, or a new address) is the site's answer and can be used sooner.
+function steadyFor(before, sig) {
+  const [, beforeUrl, beforeFields] = String(before).split('|');
+  const [, url, fields] = String(sig).split('|');
+  return fields !== beforeFields || url !== beforeUrl ? 1200 : 4000;
+}
+
 // Wait until the page has changed from `before` and stopped changing.
-const settle = (tabId, before, ms = 40000) => measured('page_wait_ms', () => settlePage(tabId, before, ms));
+const settle =(tabId, before, ms = 40000) => measured('page_wait_ms', () => settlePage(tabId, before, ms));
 async function settlePage(tabId, before, ms) {
   const end = now() + ms;
   let last = null;
@@ -362,7 +371,7 @@ async function settlePage(tabId, before, ms) {
     if (snap.length && sig !== before && !busy && actionable) {
       if (sig !== last) { last = sig; stableSince = now(); }
       else if (frame?.error || flagged(snap, 'signedIn') || flagged(snap, 'checkEmail') ||
-               !['identifier', 'password'].includes(stateOf(frame)) || now() - stableSince >= 4000) return snap;
+               !['identifier', 'password'].includes(stateOf(frame)) || now() - stableSince >= steadyFor(before, sig)) return snap;
     }
     await sleep(350);
   }
@@ -370,6 +379,14 @@ async function settlePage(tabId, before, ms) {
 }
 
 const RANK = { captcha: 5, code: 4, password: 3, identifier: 2, none: 0 };
+
+// The next step after a submit. "Check your email" wording usually means a link, but a page that
+// says it and shows a code box wants the code ("We sent a 6-digit code to your email").
+function afterSubmit(snap, frame) {
+  if (flagged(snap, 'signedIn')) return 'none';
+  const state = stateOf(frame);
+  return flagged(snap, 'checkEmail') && state !== 'code' ? 'none' : state;
+}
 
 function stateOf(f) {
   if (!f) return 'none';
@@ -887,7 +904,7 @@ async function signIn(ctx) {
     snap = await settle(tabId, before, wait);
     frame = pickFrame(snap);
     if (pass.source && frame?.error) pass.error = frame.error;
-    state = flagged(snap, 'signedIn') || flagged(snap, 'checkEmail') ? 'none' : stateOf(frame);
+    state = afterSubmit(snap, frame);
   }
   await clearAll(tabId);
   return { status: 'error', site: tabHost, message: 'Sign-in took more steps than Latch supports. Ask the user to finish signing in.' };
@@ -1105,7 +1122,7 @@ async function createAccount(ctx) {
     }
     snap = await settle(tabId, before);
     frame = pickFrame(snap);
-    state = flagged(snap, 'signedIn') || flagged(snap, 'checkEmail') ? 'none' : stateOf(frame);
+    state = afterSubmit(snap, frame);
   }
   await clearAll(tabId);
   return { status: 'error', site: host, message: 'Sign-up took more steps than Latch supports. Ask the user to finish it.' };

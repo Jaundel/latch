@@ -38,6 +38,11 @@ const bgSource = readFileSync(bgPath, 'utf8');
 const bgMoved = bgSource.replace('const PORT = 47801;', `const PORT = ${TEST_PORT};`);
 if (bgMoved === bgSource) throw new Error('background.js has no "const PORT = 47801;" line, so the test copy could reach the live bridge');
 writeFileSync(bgPath, bgMoved);
+// Chrome unloads an extension loaded over the DevTools pipe when it calls runtime.reload(),
+// so this copy behaves like an installed one (it has an update_url) and ignores the helper's
+// reload request. The update check below then shows a stale worker never fills anything.
+const manifestPath = join(ext, 'manifest.json');
+writeFileSync(manifestPath, JSON.stringify({ ...JSON.parse(readFileSync(manifestPath, 'utf8')), update_url: 'https://clients2.google.com/service/update2/crx' }, null, 2));
 
 const mailbox = new Mailbox();
 const imapStats = { logins: 0, failedLogins: 0, bodiesRead: 0 };
@@ -350,7 +355,7 @@ try {
   r = await byUrl('fill_email', apply.url());
   check('a tab named by its address is found while another tab is in front', r.status === 'filled' && await apply.inputValue('#ae') === MAIN.email, r.status);
   r = await byUrl('fill_email', url('jobs.localhost', '/no-such-page'));
-  check('an address no tab shows is refused', r.status === 'error' && front.url() === 'about:blank', r.status);
+  check('an address no tab shows is refused before anything reaches Chrome', r.status === 'tab_not_found' && front.url() === 'about:blank', r.status);
   await front.close();
 
   for (const name of ['sign_in', 'create_account']) {
@@ -423,6 +428,7 @@ try {
   check('test run finished without crashing', false, err.stack?.split('\n').slice(0, 3).join(' | '));
 } finally {
   writeFileSync(join(out, 'e2e.json'), JSON.stringify({ at: new Date().toISOString(), sourceBuild, checks, transcript }, null, 2));
+  writeFileSync(join(out, 'server.log'), serverLog);
   await context.close().catch(() => {});
   await mcp.close().catch(() => {});
   imap.server.close();
